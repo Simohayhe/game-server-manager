@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import platform
 
-# VMを使わない軽量版の案内先(将来のリポジトリ。今は本体リポを指す)
-VMLESS_URL = "https://github.com/Simohayhe/game-server-manager#今後の拡張候補"
+# VMを使わない軽量版(Windowsネイティブ)の案内先
+VMLESS_URL = "https://github.com/Simohayhe/game-server-manager-lite"
 
 
 def _ps(cmd: str) -> str:
