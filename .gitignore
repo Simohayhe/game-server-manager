@@ -28,6 +28,11 @@ __pycache__/
 venv/
 env/
 
+# ==== PyInstaller ビルド成果物 ====
+build/
+dist/
+*.spec
+
 # ==== ログ・一時 ====
 *.log
 logs/

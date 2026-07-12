@@ -37,7 +37,8 @@ class ProvisionError(Exception):
 
 
 def templates_dir() -> Path:
-    return Path(__file__).resolve().parents[1] / "provisioners"
+    from .paths import bundle_dir
+    return bundle_dir() / "provisioners"
 
 
 def load_templates(dir_path: str | Path | None = None) -> list[ProvisionTemplate]:

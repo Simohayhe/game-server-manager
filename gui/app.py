@@ -34,7 +34,8 @@ from core.transport import LocalPowerShell, SSHTransport
 REFRESH_INTERVAL_MS = 20_000
 PUBLISH_CHECK_MS = 600_000  # 外部公開ヘルスチェック間隔(10分)
 SCHED_TICK_MS = 20_000      # 再起動予約の発火チェック間隔
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
+from core.paths import app_dir
+CONFIG_PATH = app_dir() / "config.yaml"
 SCHEDULES_PATH = CONFIG_PATH.parent / "schedules.json"  # 再起動予約の永続化
 DYNSTATE_PATH = CONFIG_PATH.parent / "dynconfig.json"   # dynamic configの状態
 DYNFILE_PATH = CONFIG_PATH.parent / "dynamicconfig.ini"  # 配信するdynamic config本体

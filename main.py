@@ -5,10 +5,11 @@ from tkinter import messagebox
 
 from core import compat
 from core.config import ConfigError, load_config
-from gui import firstrun
+from core.paths import app_dir
+from gui import firstrun, setupwizard
 from gui.app import App
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = app_dir()
 CONFIG_PATH = BASE_DIR / "config.yaml"
 FIRSTRUN_MARKER = BASE_DIR / ".gsm_firstrun_done"
 
@@ -24,6 +25,11 @@ def main() -> None:
             FIRSTRUN_MARKER.write_text("done", encoding="utf-8")
         except OSError:
             pass
+
+    # config.yaml が無ければ入力ウィザードで作成する(YAML手編集不要)
+    if not CONFIG_PATH.exists():
+        if not setupwizard.run(CONFIG_PATH):
+            sys.exit(0)
 
     try:
         config = load_config(CONFIG_PATH)
