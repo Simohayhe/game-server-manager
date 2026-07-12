@@ -1,0 +1,131 @@
+# Minecraft (Fabric) サーバー構築テンプレート — 複数バージョン対応
+# 前提: Ubuntu Server(SSH可、sudo可のユーザー)。それ以外はすべてこのスクリプトが構築する。
+# バージョンはウィザードの「バージョン」欄で指定(既定は下の mc_version)。
+#   1.14以降 = 公式Fabric / 1.13以前 = Legacy Fabric に自動分岐。
+#   Javaも版に応じてTemurinから導入(〜1.16=8 / 1.17〜1.20.4=17 / 1.20.5〜=21 / 新方式=21)。
+id: minecraft_fabric
+display_name: Minecraft (Fabric)
+mc_version: "26.2"           # 既定バージョン(ウィザードで変更可)
+description: 任意バージョンのFabricサーバーを構築(1.14+=公式Fabric / 1.13以前=Legacy Fabric、Javaは自動選択)
+
+defaults:
+  service: minecraft
+  install_dir: /opt/minecraft
+  runtime_user: minecraft
+  game_port: 25565
+  rcon_port: 25575
+  memory_max_mb: auto
+  motd: A Minecraft Server
+  mc_version: "26.2"
+
+profile:
+  players_command: list
+  version_pattern: 'Starting minecraft server version (\S+)'
+  players_pattern: 'There are (\d+) of a max of (\d+) players online:?\s*(.*)'
+
+script: |
+  #!/bin/bash
+  set -e
+  export DEBIAN_FRONTEND=noninteractive
+  GAME_VER="{{mc_version}}"
+
+  echo "[1/9] バージョン判定(Java / ローダー種別)"
+  MAJ=$(echo "$GAME_VER" | cut -d. -f1)
+  MIN=$(echo "$GAME_VER" | cut -d. -f2); MIN=${MIN:-0}
+  PATCH=$(echo "$GAME_VER" | cut -d. -f3); PATCH=${PATCH:-0}
+  if [ "$MAJ" = "1" ]; then
+    if [ "$MIN" -le 16 ]; then JAVA_VER=8
+    elif [ "$MIN" -le 20 ]; then
+      if [ "$MIN" -eq 20 ] && [ "$PATCH" -ge 5 ]; then JAVA_VER=21; else JAVA_VER=17; fi
+    else JAVA_VER=21
+    fi
+    if [ "$MIN" -le 13 ]; then FABRIC_META="https://meta.legacyfabric.net"; KIND="Legacy Fabric"
+    else FABRIC_META="https://meta.fabricmc.net"; KIND="Fabric"
+    fi
+  else
+    JAVA_VER=21; FABRIC_META="https://meta.fabricmc.net"; KIND="Fabric"
+  fi
+  echo "  MC $GAME_VER -> Java $JAVA_VER / $KIND ($FABRIC_META)"
+
+  echo "[2/9] Java $JAVA_VER (Temurin) と必要パッケージ"
+  apt-get update -qq
+  apt-get install -y -qq curl wget gnupg apt-transport-https ca-certificates python3 > /dev/null
+  if [ ! -f /etc/apt/sources.list.d/adoptium.list ]; then
+    install -d -m 0755 /etc/apt/keyrings
+    wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg
+    CODENAME=$(awk -F= '/^VERSION_CODENAME/{print $2}' /etc/os-release)
+    echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $CODENAME main" > /etc/apt/sources.list.d/adoptium.list
+    apt-get update -qq
+  fi
+  apt-get install -y -qq "temurin-${JAVA_VER}-jre" > /dev/null
+  JAVA_BIN=$(ls -d /usr/lib/jvm/temurin-${JAVA_VER}-jre*/bin/java 2>/dev/null | head -1)
+  [ -x "$JAVA_BIN" ] || JAVA_BIN=$(command -v java)
+  "$JAVA_BIN" -version 2>&1 | head -1
+
+  echo "[3/9] 実行ユーザーとディレクトリ"
+  id {{runtime_user}} >/dev/null 2>&1 || useradd --system --home {{install_dir}} --shell /usr/sbin/nologin {{runtime_user}}
+  mkdir -p {{install_dir}} && cd {{install_dir}}
+  mkdir -p mods
+
+  echo "[4/9] $KIND サーバー本体のダウンロード(Minecraft $GAME_VER)"
+  LOADER_VER=$(curl -fsSL "$FABRIC_META/v2/versions/loader" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((v["version"] for v in d if v.get("stable")), d[0]["version"]))')
+  INST_VER=$(curl -fsSL "$FABRIC_META/v2/versions/installer" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((v["version"] for v in d if v.get("stable")), d[0]["version"]))')
+  echo "  Loader $LOADER_VER / Installer $INST_VER"
+  curl -fsSL -o fabric-server-launch.jar "$FABRIC_META/v2/versions/loader/$GAME_VER/$LOADER_VER/$INST_VER/server/jar"
+
+  echo "[5/9] EULA同意と server.properties"
+  echo "eula=true" > eula.txt
+  cat > server.properties <<PROPS
+  server-port={{game_port}}
+  enable-rcon=true
+  rcon.port={{rcon_port}}
+  rcon.password={{rcon_password}}
+  motd={{motd}}
+  PROPS
+
+  echo "[6/9] メモリ割り当ての決定"
+  MEM_INPUT="{{memory_max_mb}}"
+  if [ "$MEM_INPUT" = "auto" ]; then
+    TOTAL=$(free -m | awk '/^Mem:/ {print $2}' | head -1)
+    MEM=$(( TOTAL - 1200 )); [ "$MEM" -lt 1024 ] && MEM=1024
+  else
+    MEM=$MEM_INPUT
+  fi
+  XMS=1024; [ "$MEM" -lt "$XMS" ] && XMS=$MEM
+  echo "  -Xmx${MEM}M -Xms${XMS}M (java=$JAVA_BIN)"
+
+  echo "[7/9] systemdサービス登録"
+  chown -R {{runtime_user}}:{{runtime_user}} {{install_dir}}
+  cat > /etc/systemd/system/{{service}}.service <<UNIT
+  [Unit]
+  Description=Minecraft Server (Fabric) - {{service}}
+  After=network.target
+
+  [Service]
+  User={{runtime_user}}
+  WorkingDirectory={{install_dir}}
+  ExecStart=$JAVA_BIN -Xmx${MEM}M -Xms${XMS}M -jar fabric-server-launch.jar nogui
+  Restart=on-failure
+  RestartSec=10
+
+  [Install]
+  WantedBy=multi-user.target
+  UNIT
+  systemctl daemon-reload
+  systemctl enable {{service}}
+
+  echo "[8/9] 管理用sudoers(NOPASSWD)"
+  cat > /etc/sudoers.d/gamemanager-{{service}} <<SUDO
+  {{ssh_user}} ALL=(ALL) NOPASSWD: /usr/bin/systemctl start {{service}}, /usr/bin/systemctl stop {{service}}, /usr/bin/systemctl restart {{service}}, /usr/bin/systemctl status {{service}}, /usr/bin/journalctl
+  SUDO
+  chmod 440 /etc/sudoers.d/gamemanager-{{service}}
+  visudo -c -f /etc/sudoers.d/gamemanager-{{service}} > /dev/null
+
+  echo "[9/9] 起動と待機(初回はワールド生成で数分かかることがあります)"
+  systemctl start {{service}}
+  for i in $(seq 1 60); do
+    if ss -tln | grep -q ":{{game_port}} "; then echo "  ポート{{game_port}} LISTEN確認"; break; fi
+    sleep 5
+  done
+  systemctl is-active {{service}}
+  echo "PROVISION_OK GAME_VERSION=$GAME_VER"

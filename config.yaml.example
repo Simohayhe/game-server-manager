@@ -1,0 +1,119 @@
+# ゲームサーバーマネージャー 設定サンプル
+# このファイルを config.yaml にコピーし、実際の値に書き換えて使ってください。
+#   cp config.yaml.example config.yaml
+# config.yaml はパスワードを含むため .gitignore 済み(公開されません)。
+
+# ==== Hyper-Vホストへの接続 ====
+# mode: local → このソフトをHyper-Vホスト上で直接動かす
+# mode: ssh   → 別マシンからホストにSSH接続して管理する
+hyperv:
+  mode: local
+  # mode: ssh のとき:
+  # host: 192.168.0.10
+  # user: WINDOWS_USER
+  # password: CHANGE_ME        # または key: ~/.ssh/id_ed25519
+
+# ==== SQL共有連動のMOD自動デプロイ(任意) ====
+mod_sync:
+  enabled: false
+  modcache_dir: modcache
+  server_mods_dir: /opt/minecraft/mods
+  server_config_dir: /opt/minecraft/config
+  runtime_user: minecraft
+  dependency_jars: [fabric-api.jar]
+  sync_jar: invsyncmod.jar
+
+# ==== サーバー間データ共有用MySQL(任意・SQLタブ) ====
+mysql:
+  host: 192.168.0.20
+  port: 3306
+  user: gsmanager
+  password: CHANGE_ME
+  prefix: gsdata_
+
+# ==== VM用ネットワーク既定(新規構築のIP選択に使用) ====
+network:
+  subnet: 192.168.0.0/24
+  vm_range: 100-199            # VMに割り当てる第4オクテットの範囲
+  gateway: 192.168.0.1
+
+# ==== 外部公開(FQDNで外部からアクセスさせる・任意) ====
+publish:
+  public_name: game.example.com
+  glue_hosts:
+  - ns1.example.com
+  - ns2.example.com
+  registrar: レジストラ名(手動更新の注意喚起用)
+  last_wan_ip: 0.0.0.0         # アプリが自動更新
+
+# ==== LAN内DNS自動登録(ipam等のPowerDNS・任意) ====
+dns:
+  host: 192.168.0.20
+  domain: example.com
+  ssh:
+    user: CHANGE_ME
+    password: CHANGE_ME
+
+# ==== ARK(ホストで動くASAサーバー・任意) ====
+# ark_steamcmd: 'C:\path\to\steamcmd\steamcmd.exe'
+# ark_hosts:
+#   - display_name: 'ARK: The Island'
+#     install_dir: 'C:\ArkServers\TheIsland'
+#     launch_args: '"TheIsland_WP?Port=7777?Queryport=27015?RCONPort=27020" -ServerPlatform=ALL'
+#     rcon_host: 127.0.0.1
+
+# ==== バックアップ ====
+backup:
+  path: 'C:\GameBackups'
+  keep: 10
+  compress: true
+
+# ==== ゲームサーバープロファイル ====
+# 新しいゲームは1ブロック追加するだけで管理対象になる汎用設計。
+servers:
+
+  # ---- Minecraft(Fabric)の例 ----
+  minecraft:
+    display_name: Minecraft サーバー
+    vm: mcserver01                 # Hyper-V上のVM名
+    address: 192.168.0.100         # VMのIP
+    fqdn: mcserver01.example.com    # 表示用FQDN(任意)
+    ssh:
+      user: CHANGE_ME
+      password: CHANGE_ME
+    service: minecraft             # VM内のsystemdサービス名
+    rcon:
+      port: 25575
+      password: CHANGE_ME          # server.properties の rcon.password
+    players_command: list
+    game_port: 25565
+    version_pattern: 'Starting minecraft server version (\S+)'
+    players_pattern: 'There are (\d+) of a max of (\d+) players online:?\s*(.*)'
+    external_port: 25565
+
+  # ---- Palworld(Linux VM・native)の例 ----
+  # palworld:
+  #   display_name: Palworld サーバー
+  #   vm: palworld01
+  #   address: 192.168.0.110
+  #   fqdn: palworld01.example.com
+  #   game: palworld
+  #   ssh: { user: CHANGE_ME, password: CHANGE_ME }
+  #   install_dir: /home/USER/palserver
+  #   service: palworld
+  #   rcon: { port: 25575, password: CHANGE_ME }
+  #   players_command: ShowPlayers
+  #   game_port: 8211
+  #   external_port: 8211
+
+  # ---- systemdを使わないゲーム(コマンド直指定)の例 ----
+  # custom-game:
+  #   display_name: 手動管理のゲーム
+  #   address: 192.168.0.120
+  #   ssh: { user: CHANGE_ME, password: CHANGE_ME }
+  #   commands:
+  #     start: /opt/game/start.sh
+  #     stop: /opt/game/stop.sh
+  #     restart: /opt/game/restart.sh
+  #     status: pgrep -x game_server > /dev/null && echo active || echo inactive
+  #     log: tail -n {lines} /opt/game/logs/latest.log

@@ -1,0 +1,34 @@
+# ==== 秘密情報・ユーザー固有(絶対に公開しない) ====
+config.yaml
+config.yaml.bak
+*.local.yaml
+
+# GSMが生成する状態ファイル(パスワード/Webhook/環境固有を含む)
+crashwatch.json
+notify.json
+portsync.json
+schedules.json
+dynconfig.json
+arkbehavior.json
+dynamicconfig.ini
+
+# Claude Code 用の内部引き継ぎメモ(パスワード・自宅NW情報を含む)
+CLAUDE.md
+
+# ローカルmodライブラリ/キャッシュ(jar実体は配布しない)
+modcache/
+modlib/
+
+# ==== Python ====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ==== ログ・一時 ====
+*.log
+logs/
+scratchpad/
+*.tmp

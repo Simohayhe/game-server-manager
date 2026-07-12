@@ -1,0 +1,145 @@
+# Minecraft (Forge) サーバー構築テンプレート — 複数バージョン対応
+# 前提: Ubuntu Server(SSH可、sudo可のユーザー)。それ以外はすべてこのスクリプトが構築する。
+# バージョンはウィザードの「バージョン」欄で指定(既定は下の mc_version)。
+#   Forge版は promotions_slim.json から解決(recommended優先→latest)。
+#   起動方式: 〜1.16 = forge-*.jar 直起動 / 1.17〜 = @args 方式(run.sh相当)を自動分岐。
+#   Javaも版に応じてTemurinから導入(〜1.16=8 / 1.17〜1.20.4=17 / 1.20.5〜=21)。
+id: minecraft_forge
+display_name: Minecraft (Forge)
+mc_version: "1.20.1"         # 既定バージョン(ウィザードで変更可)
+description: 任意バージョンのForgeサーバーを構築(Forge版は自動解決、起動方式・Javaも自動選択)
+
+defaults:
+  service: minecraft
+  install_dir: /opt/minecraft
+  runtime_user: minecraft
+  game_port: 25565
+  rcon_port: 25575
+  memory_max_mb: auto
+  motd: A Minecraft Server
+  mc_version: "1.20.1"
+
+profile:
+  players_command: list
+  version_pattern: 'Starting minecraft server version (\S+)'
+  players_pattern: 'There are (\d+) of a max of (\d+) players online:?\s*(.*)'
+
+script: |
+  #!/bin/bash
+  set -e
+  export DEBIAN_FRONTEND=noninteractive
+  GAME_VER="{{mc_version}}"
+
+  echo "[1/9] バージョン判定(Java / 起動方式)"
+  MAJ=$(echo "$GAME_VER" | cut -d. -f1)
+  MIN=$(echo "$GAME_VER" | cut -d. -f2); MIN=${MIN:-0}
+  PATCH=$(echo "$GAME_VER" | cut -d. -f3); PATCH=${PATCH:-0}
+  if [ "$MAJ" = "1" ]; then
+    if [ "$MIN" -le 16 ]; then JAVA_VER=8
+    elif [ "$MIN" -le 20 ]; then
+      if [ "$MIN" -eq 20 ] && [ "$PATCH" -ge 5 ]; then JAVA_VER=21; else JAVA_VER=17; fi
+    else JAVA_VER=21
+    fi
+  else JAVA_VER=21
+  fi
+  NEWSTYLE=no
+  if [ "$MAJ" = "1" ] && [ "$MIN" -ge 17 ]; then NEWSTYLE=yes; fi
+  if [ "$MAJ" != "1" ]; then NEWSTYLE=yes; fi
+  echo "  MC $GAME_VER -> Java $JAVA_VER / 新起動方式=$NEWSTYLE"
+
+  echo "[2/9] Java $JAVA_VER (Temurin) と必要パッケージ"
+  apt-get update -qq
+  apt-get install -y -qq curl wget gnupg apt-transport-https ca-certificates python3 > /dev/null
+  if [ ! -f /etc/apt/sources.list.d/adoptium.list ]; then
+    install -d -m 0755 /etc/apt/keyrings
+    wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg
+    CODENAME=$(awk -F= '/^VERSION_CODENAME/{print $2}' /etc/os-release)
+    echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $CODENAME main" > /etc/apt/sources.list.d/adoptium.list
+    apt-get update -qq
+  fi
+  apt-get install -y -qq "temurin-${JAVA_VER}-jre" > /dev/null
+  JAVA_BIN=$(ls -d /usr/lib/jvm/temurin-${JAVA_VER}-jre*/bin/java 2>/dev/null | head -1)
+  [ -x "$JAVA_BIN" ] || JAVA_BIN=$(command -v java)
+  "$JAVA_BIN" -version 2>&1 | head -1
+
+  echo "[3/9] Forge版の解決(promotions)"
+  FORGE_VER=$(curl -fsSL https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json | python3 -c "import sys,json; d=json.load(sys.stdin)['promos']; print(d.get('$GAME_VER-recommended') or d.get('$GAME_VER-latest') or '')")
+  if [ -z "$FORGE_VER" ]; then echo "  MC $GAME_VER に対応するForgeが見つかりません"; exit 1; fi
+  FULL="$GAME_VER-$FORGE_VER"
+  echo "  Forge $FULL"
+
+  echo "[4/9] 実行ユーザーとディレクトリ"
+  id {{runtime_user}} >/dev/null 2>&1 || useradd --system --home {{install_dir}} --shell /usr/sbin/nologin {{runtime_user}}
+  mkdir -p {{install_dir}} && cd {{install_dir}}
+  mkdir -p mods
+
+  echo "[5/9] Forgeインストーラ取得&サーバーインストール"
+  curl -fsSL -o forge-installer.jar "https://maven.minecraftforge.net/net/minecraftforge/forge/$FULL/forge-$FULL-installer.jar"
+  "$JAVA_BIN" -jar forge-installer.jar --installServer
+  rm -f forge-installer.jar forge-installer.jar.log
+
+  echo "[6/9] EULA同意と server.properties"
+  echo "eula=true" > eula.txt
+  cat > server.properties <<PROPS
+  server-port={{game_port}}
+  enable-rcon=true
+  rcon.port={{rcon_port}}
+  rcon.password={{rcon_password}}
+  motd={{motd}}
+  PROPS
+
+  echo "[7/9] メモリと起動コマンドの決定"
+  MEM_INPUT="{{memory_max_mb}}"
+  if [ "$MEM_INPUT" = "auto" ]; then
+    TOTAL=$(free -m | awk '/^Mem:/ {print $2}' | head -1)
+    MEM=$(( TOTAL - 1200 )); [ "$MEM" -lt 1024 ] && MEM=1024
+  else
+    MEM=$MEM_INPUT
+  fi
+  XMS=1024; [ "$MEM" -lt "$XMS" ] && XMS=$MEM
+  if [ "$NEWSTYLE" = "yes" ]; then
+    ARGS=$(ls libraries/net/minecraftforge/forge/*/unix_args.txt 2>/dev/null | head -1)
+    if [ -z "$ARGS" ]; then echo "  unix_args.txt が見つかりません(Forge構成が想定外)"; exit 1; fi
+    echo "-Xmx${MEM}M -Xms${XMS}M" > user_jvm_args.txt
+    EXEC="$JAVA_BIN @user_jvm_args.txt @$ARGS nogui"
+  else
+    JAR=$(ls forge-*.jar 2>/dev/null | grep -v installer | head -1)
+    if [ -z "$JAR" ]; then echo "  forgeサーバーjarが見つかりません"; exit 1; fi
+    EXEC="$JAVA_BIN -Xmx${MEM}M -Xms${XMS}M -jar $JAR nogui"
+  fi
+  echo "  ExecStart: $EXEC"
+
+  echo "[8/9] systemdサービス登録"
+  chown -R {{runtime_user}}:{{runtime_user}} {{install_dir}}
+  cat > /etc/systemd/system/{{service}}.service <<UNIT
+  [Unit]
+  Description=Minecraft Server (Forge) - {{service}}
+  After=network.target
+
+  [Service]
+  User={{runtime_user}}
+  WorkingDirectory={{install_dir}}
+  ExecStart=$EXEC
+  Restart=on-failure
+  RestartSec=10
+
+  [Install]
+  WantedBy=multi-user.target
+  UNIT
+  systemctl daemon-reload
+  systemctl enable {{service}}
+
+  cat > /etc/sudoers.d/gamemanager-{{service}} <<SUDO
+  {{ssh_user}} ALL=(ALL) NOPASSWD: /usr/bin/systemctl start {{service}}, /usr/bin/systemctl stop {{service}}, /usr/bin/systemctl restart {{service}}, /usr/bin/systemctl status {{service}}, /usr/bin/journalctl
+  SUDO
+  chmod 440 /etc/sudoers.d/gamemanager-{{service}}
+  visudo -c -f /etc/sudoers.d/gamemanager-{{service}} > /dev/null
+
+  echo "[9/9] 起動と待機(Forge初回はライブラリ展開で数分かかります)"
+  systemctl start {{service}}
+  for i in $(seq 1 72); do
+    if ss -tln | grep -q ":{{game_port}} "; then echo "  ポート{{game_port}} LISTEN確認"; break; fi
+    sleep 5
+  done
+  systemctl is-active {{service}}
+  echo "PROVISION_OK GAME_VERSION=$GAME_VER FORGE=$FULL"

@@ -1,0 +1,96 @@
+"""定期再起動スケジューラの永続モデル。
+
+各ジョブ = 対象サーバー(MC/ARK)を毎日決まった時刻(HH:MM)に再起動する予約。
+GUIの外に状態を持ち、アプリを再起動しても schedules.json から復元できるようにする。
+実際の発火判定・再起動実行はGUI側(tickループ)が行い、ここは「保存」と「発火時刻の判定」だけ担う。
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+
+WEEKDAY_LABELS = ["月", "火", "水", "木", "金", "土", "日"]  # 0=月 .. 6=日(datetime.weekday準拠)
+
+
+@dataclass
+class RestartJob:
+    id: str                      # 一意ID(生成はGUI)
+    kind: str                    # "ark" | "mc"
+    target: str                  # ark=map_label / mc=サーバー名(profile.name)
+    display: str                 # 表示名
+    times: list[str] = field(default_factory=list)  # ["04:00", "16:00"]
+    days: list[int] = field(default_factory=list)    # 実行曜日 0=月..6=日。空=毎日
+    enabled: bool = True
+    respawn_dinos: bool = False   # 再起動後に野生恐竜をリスポーン(ARKのみ)
+    action: str = "restart"       # "restart"(再起動) or "backup"(バックアップ)
+
+    def action_text(self) -> str:
+        return "バックアップ" if self.action == "backup" else "再起動"
+
+    def times_text(self) -> str:
+        return ", ".join(self.times) if self.times else "(なし)"
+
+    def days_text(self) -> str:
+        if not self.days or len(self.days) >= 7:
+            return "毎日"
+        return "".join(WEEKDAY_LABELS[d] for d in sorted(self.days) if 0 <= d <= 6)
+
+    def runs_on(self, weekday: int) -> bool:
+        """weekday(0=月..6=日)にこのジョブが動くか。days空=毎日。"""
+        return (not self.days) or (weekday in self.days)
+
+
+def load_jobs(path: str | Path) -> list[RestartJob]:
+    p = Path(path)
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for j in data.get("jobs", []):
+        try:
+            out.append(RestartJob(
+                id=str(j["id"]), kind=j.get("kind", "mc"),
+                target=j.get("target", ""), display=j.get("display", ""),
+                times=list(j.get("times", [])),
+                days=[int(d) for d in j.get("days", []) if 0 <= int(d) <= 6],
+                enabled=bool(j.get("enabled", True)),
+                respawn_dinos=bool(j.get("respawn_dinos", False)),
+                action=j.get("action", "restart")))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def save_jobs(path: str | Path, jobs: list[RestartJob]) -> None:
+    Path(path).write_text(
+        json.dumps({"jobs": [asdict(j) for j in jobs]}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
+
+
+def normalize_time(text: str) -> str | None:
+    """'4:00' や '04:0' を 'HH:MM' に正規化。不正なら None。"""
+    text = text.strip()
+    if ":" not in text:
+        return None
+    hh, _, mm = text.partition(":")
+    try:
+        h, m = int(hh), int(mm)
+    except ValueError:
+        return None
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return None
+    return f"{h:02d}:{m:02d}"
+
+
+def due_jobs(jobs: list[RestartJob], now: datetime) -> list[RestartJob]:
+    """今 now(分・曜日)に発火すべき有効ジョブ。重複発火の抑止は呼び出し側で行う。"""
+    hhmm = now.strftime("%H:%M")
+    wd = now.weekday()               # 0=月 .. 6=日
+    return [j for j in jobs
+            if j.enabled and hhmm in j.times and j.runs_on(wd)]
