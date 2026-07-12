@@ -24,7 +24,8 @@ from core.gameserver import GameServer
 from core.hyperv import HyperVManager
 from core import (arkconfig, arkupdate, backup, conntest, dnsreg, dynconfig,
                   moddeploy, modmanager, netscan, notify, palconfig, palupdate,
-                  portsync, publish, scheduler, serverconfig, settings, upnp)
+                  portsync, publish, scheduler, serverconfig, settings,
+                  updatecheck, upnp)
 from core.orchestration import (change_vm_ip, individualize_clone,
                                 start_server_with_vm)
 from core.sqlshare import SqlShareManager
@@ -43,6 +44,9 @@ NOTIFY_PATH = CONFIG_PATH.parent / "notify.json"        # Discord通知の設定
 CRASH_PATH = CONFIG_PATH.parent / "crashwatch.json"     # クラッシュ自動復旧の状態
 ARKBEHAVIOR_PATH = CONFIG_PATH.parent / "arkbehavior.json"  # ARK再起動時の挙動(恐竜リスポーン等)
 RESMON_MS = 3000    # リソース表示バーの更新間隔
+PUBSTAT_MS = 60000  # 外部公開ステータスの照合間隔(UPnP+DNS。重いので長め)
+APP_VERSION = "1.0.0"                          # このアプリのバージョン(リリースtagと比較)
+GITHUB_REPO = "Simohayhe/game-server-manager"  # アップデート確認先
 # ホストのCPU%/メモリ(使用|合計 MB)/ネット(受信|送信 Bytes/sec)を1行で取得
 RESMON_PS = (
     "$c=(Get-CimInstance Win32_Processor|Measure-Object -Property LoadPercentage -Average).Average;"
@@ -515,6 +519,12 @@ class App(tk.Tk):
                 password=config.hyperv.password)
         self._resmon_thread = threading.Thread(target=self._resmon_loop, daemon=True)
         self._resmon_thread.start()
+        # 外部公開ステータスの監視スレッド(UPnP転送 + DNS→WAN を照合)
+        self._pubstat_stop = False
+        self._pubstat_thread = threading.Thread(target=self._pubstat_loop, daemon=True)
+        self._pubstat_thread.start()
+        # 起動時にGitHubの新バージョンを1回だけ確認(バックグラウンド)
+        threading.Thread(target=self._update_check_once, daemon=True).start()
         self._resolve_fqdns()
         # VM範囲を一度スイープしてARPテーブルを温める(IP列のMAC逆引き用)
         net = config.network
@@ -696,6 +706,14 @@ class App(tk.Tk):
         tk.Label(bar, textvariable=self.res_net_var, **common).pack(side=tk.LEFT)
         tk.Label(bar, text="ホスト", bg=PAL["heading"], fg="#c8d0dc",
                  font=("Segoe UI", 9)).pack(side=tk.RIGHT, padx=10)
+        # アップデート通知(新版がある時だけ点灯・クリックでリリースページ)
+        self._update_url = f"https://github.com/{GITHUB_REPO}/releases"
+        self.update_var = tk.StringVar(value="")
+        self.update_lbl = tk.Label(bar, textvariable=self.update_var,
+                                   bg=PAL["heading"], fg="#ffd166",
+                                   font=("Segoe UI", 9, "bold"), cursor="hand2")
+        self.update_lbl.pack(side=tk.RIGHT, padx=6)
+        self.update_lbl.bind("<Button-1>", lambda _e: self._open_update_url())
 
     @staticmethod
     def _parse_resmon(out: str):
@@ -747,6 +765,105 @@ class App(tk.Tk):
         mem_col = ("#ff6b6b" if mempct >= 90 else "#ffd166" if mempct >= 78 else "#ffffff")
         self.res_cpu_lbl.configure(fg=cpu_col)
         self.res_mem_lbl.configure(fg=mem_col)
+
+    # ---- 外部公開ステータス(UPnP転送 + DNS→WAN の照合) ----
+    def _pubstat_loop(self) -> None:
+        time.sleep(6)                       # 起動直後の初期化と競合させない
+        while not self._pubstat_stop:
+            try:
+                results = self._compute_pubstat()
+            except Exception:
+                results = {}
+            if results:
+                self._ui_queue.put(
+                    (lambda _r, _e, d=results: self._pubstat_apply(d), None, None))
+            for _ in range(int(PUBSTAT_MS / 500)):   # 停止フラグを見つつ分割スリープ
+                if self._pubstat_stop:
+                    break
+                time.sleep(0.5)
+
+    def _compute_pubstat(self) -> dict:
+        """各サーバーの外部公開状態を返す(ワーカースレッド。tkinterに触れないこと)。
+
+        判定材料: ①ルーターのUPnPポート転送が そのサーバー宛に存在するか
+                  ②自FQDNのA解決が現WAN IPを指すか。両方揃えば「公開中」。
+        """
+        targets = [(n, s.profile) for n, s in self.servers.items()
+                   if getattr(s.profile, "external_port", None)]
+        if not targets:
+            return {}
+        gw = getattr(self, "_pubstat_gw", None)
+        try:
+            if gw is None:
+                prefer = (self.config_data.network.gateway
+                          if self.config_data.network else None)
+                gw = upnp.find_gateway(prefer_host=prefer)
+                self._pubstat_gw = gw
+            mappings = gw.client.list_port_mappings()
+            wan = gw.external_ip
+        except Exception:
+            self._pubstat_gw = None                  # 次回に再探索
+            return {n: "―" for n, _p in targets}     # UPnP不可=判定不能
+        existing = {(str(m.get("external_port")), (m.get("protocol") or "").upper()): m
+                    for m in mappings}
+        resolver = self.config_data.dns.host if self.config_data.dns else None
+        out = {}
+        for n, p in targets:
+            proto = "UDP" if p.game == "palworld" else "TCP"
+            m = existing.get((str(p.external_port), proto))
+            forwarded = bool(m and m.get("internal_client") == p.address)
+            dns_wan = False
+            dns_checked = False
+            fqdn = getattr(p, "fqdn", None)
+            if resolver and fqdn and wan:
+                dns_checked = True
+                try:
+                    dns_wan = wan in conntest.dns_query(resolver, fqdn, 1)  # A=1
+                except Exception:
+                    dns_checked = False        # 照会失敗=未確認(転送だけで判定)
+            if forwarded and (dns_wan or not dns_checked):
+                out[n] = "🌐 公開中"            # 転送あり＋(DNS→WAN or DNS未確認)
+            elif forwarded or dns_wan:
+                out[n] = "🟡 要確認"            # 片方だけ(例: 転送のみ / DNSのみ)
+            else:
+                out[n] = "🔒 非公開"
+        return out
+
+    def _pubstat_apply(self, results: dict) -> None:
+        for name, text in results.items():
+            if self.sv_tree.exists(name):
+                try:
+                    self.sv_tree.set(name, "public", text)
+                except Exception:
+                    pass
+
+    # ---- アプリ内アップデート通知(GitHub Releases) ----
+    def _update_check_once(self) -> None:
+        """起動時に1回、GitHub Releasesで新版を確認(ワーカースレッド)。"""
+        try:
+            result = updatecheck.check_latest(GITHUB_REPO, APP_VERSION)
+        except Exception:
+            return
+        self._ui_queue.put(
+            (lambda _r, _e, d=result: self._update_check_apply(d), None, None))
+
+    def _update_check_apply(self, result: dict) -> None:
+        if not result or not result.get("update_available"):
+            return
+        latest = result.get("latest")
+        self._update_url = result.get("url") or self._update_url
+        if hasattr(self, "update_var"):
+            self.update_var.set(f"🔔 新バージョン {latest}(クリック)")
+        self._append_log(f"🔔 新しいバージョン {latest} が公開されています"
+                         f"(現在 v{APP_VERSION}): {self._update_url}")
+        self._set_status(f"新バージョン {latest} が利用可能です")
+
+    def _open_update_url(self) -> None:
+        import webbrowser
+        try:
+            webbrowser.open(self._update_url)
+        except Exception:
+            pass
 
     def _build_ui(self) -> None:
         self._build_resource_bar()          # 全タブ共通の上部リソースバー
@@ -821,22 +938,25 @@ class App(tk.Tk):
         paned.add(sv_frame, weight=2)
 
         self.sv_tree = ttk.Treeview(
-            sv_frame, columns=("vm", "status", "address", "port", "version", "players"),
+            sv_frame,
+            columns=("vm", "status", "public", "address", "port", "version", "players"),
             show="tree headings", height=5)
         self.sv_tree.heading("#0", text="サーバー")
         self.sv_tree.heading("vm", text="VM")
         self.sv_tree.heading("status", text="状態")
+        self.sv_tree.heading("public", text="外部公開")
         self.sv_tree.heading("address", text="アドレス")
         self.sv_tree.heading("port", text="ポート")
         self.sv_tree.heading("version", text="バージョン")
         self.sv_tree.heading("players", text="プレイヤー数")
         self.sv_tree.column("#0", width=170)
         self.sv_tree.column("vm", width=100, anchor=tk.CENTER)
-        self.sv_tree.column("status", width=100, anchor=tk.CENTER)
-        self.sv_tree.column("address", width=180, anchor=tk.CENTER)
+        self.sv_tree.column("status", width=90, anchor=tk.CENTER)
+        self.sv_tree.column("public", width=90, anchor=tk.CENTER)
+        self.sv_tree.column("address", width=170, anchor=tk.CENTER)
         self.sv_tree.column("port", width=60, anchor=tk.CENTER)
         self.sv_tree.column("version", width=80, anchor=tk.CENTER)
-        self.sv_tree.column("players", width=200)
+        self.sv_tree.column("players", width=180)
         self.sv_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=(6, 0))
 
         ttk.Label(
@@ -935,12 +1055,13 @@ class App(tk.Tk):
             sec_id = f"__sec__{game}"
             label = GAME_SECTIONS.get(game, f"🎮  {game}")
             self.sv_tree.insert("", tk.END, iid=sec_id, text=label, open=True,
-                                tags=("section",), values=("", "", "", "", "", ""))
+                                tags=("section",), values=("", "", "", "", "", "", ""))
             for name in by_game[game]:
                 profile = self.servers[name].profile
                 addr, port = self._server_addr_port(profile)
+                pub = "…" if getattr(profile, "external_port", None) else "―"
                 self.sv_tree.insert(sec_id, tk.END, iid=name, text=profile.display_name,
-                                    values=(profile.vm or "-", "…", addr, port, "?", ""))
+                                    values=(profile.vm or "-", "…", pub, addr, port, "?", ""))
 
     def _build_sql_tab(self, parent: ttk.Frame) -> None:
         if self.sqlshare is None:
@@ -5051,8 +5172,9 @@ class App(tk.Tk):
             self.servers[name] = GameServer(new_profile)
             addr, port = self._server_addr_port(new_profile)
             if not self.sv_tree.exists(name):
+                pub = "…" if getattr(new_profile, "external_port", None) else "―"
                 self.sv_tree.insert("", tk.END, iid=name, text=new_profile.display_name,
-                                    values=(new_profile.vm or "-", "…", addr, port, "?", ""))
+                                    values=(new_profile.vm or "-", "…", pub, addr, port, "?", ""))
             self._set_status(f"{display_name} の構築が完了しました")
             messagebox.showinfo("構築完了",
                                 f"{display_name} の構築が完了しました。\n"
@@ -5285,6 +5407,7 @@ class App(tk.Tk):
 
     def _on_close(self) -> None:
         self._resmon_stop = True
+        self._pubstat_stop = True
         for server in self.servers.values():
             server.close()
         try:
