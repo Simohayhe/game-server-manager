@@ -11,6 +11,7 @@ schedules.json
 dynconfig.json
 arkbehavior.json
 dynamicconfig.ini
+.gsm_firstrun_done
 
 # Claude Code 用の内部引き継ぎメモ(パスワード・自宅NW情報を含む)
 CLAUDE.md
