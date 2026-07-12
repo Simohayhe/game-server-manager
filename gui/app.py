@@ -790,7 +790,8 @@ class App(tk.Tk):
         """
         targets = [(n, s.profile) for n, s in self.servers.items()
                    if getattr(s.profile, "external_port", None)]
-        if not targets:
+        arks = list(enumerate(self.arkhosts))
+        if not targets and not arks:
             return {}
         gw = getattr(self, "_pubstat_gw", None)
         try:
@@ -803,11 +804,13 @@ class App(tk.Tk):
             wan = gw.external_ip
         except Exception:
             self._pubstat_gw = None                  # 次回に再探索
-            return {n: "―" for n, _p in targets}     # UPnP不可=判定不能
+            return {"servers": {n: "―" for n, _p in targets},   # UPnP不可=判定不能
+                    "ark": {str(i): "―" for i, _ah in arks}}
         existing = {(str(m.get("external_port")), (m.get("protocol") or "").upper()): m
                     for m in mappings}
         resolver = self.config_data.dns.host if self.config_data.dns else None
-        out = {}
+        # --- VM上のサーバー(MC/Palworld): 転送 + DNS→WAN ---
+        srv = {}
         for n, p in targets:
             proto = "UDP" if p.game == "palworld" else "TCP"
             m = existing.get((str(p.external_port), proto))
@@ -822,20 +825,51 @@ class App(tk.Tk):
                 except Exception:
                     dns_checked = False        # 照会失敗=未確認(転送だけで判定)
             if forwarded and (dns_wan or not dns_checked):
-                out[n] = "🌐 公開中"            # 転送あり＋(DNS→WAN or DNS未確認)
+                srv[n] = "🌐 公開中"            # 転送あり＋(DNS→WAN or DNS未確認)
             elif forwarded or dns_wan:
-                out[n] = "🟡 要確認"            # 片方だけ(例: 転送のみ / DNSのみ)
+                srv[n] = "🟡 要確認"            # 片方だけ(例: 転送のみ / DNSのみ)
             else:
-                out[n] = "🔒 非公開"
-        return out
+                srv[n] = "🔒 非公開"
+        # --- ARK(ホストで動く): ゲーム/クエリの両UDPをホストIPへ転送しているか ---
+        ark = {}
+        if arks:
+            try:
+                host_ip = upnp.local_ip_toward(
+                    self.config_data.network.gateway
+                    if self.config_data.network else "192.168.11.1")
+            except Exception:
+                host_ip = None
+            for i, ah in arks:
+                gp = getattr(ah.cfg, "game_port", None)
+                qp = getattr(ah.cfg, "query_port", None)
+                gm = existing.get((str(gp), "UDP")) if gp else None
+                qm = existing.get((str(qp), "UDP")) if qp else None
+                g_ok = bool(gm and gm.get("internal_client") == host_ip)
+                q_ok = bool(qm and qm.get("internal_client") == host_ip)
+                if g_ok and q_ok:
+                    ark[str(i)] = "🌐 公開中"    # ゲーム+クエリ両方 転送あり
+                elif g_ok or q_ok:
+                    ark[str(i)] = "🟡 要確認"    # 片方だけ
+                else:
+                    ark[str(i)] = "🔒 非公開"
+        return {"servers": srv, "ark": ark}
 
     def _pubstat_apply(self, results: dict) -> None:
-        for name, text in results.items():
+        if not results:
+            return
+        for name, text in results.get("servers", {}).items():
             if self.sv_tree.exists(name):
                 try:
                     self.sv_tree.set(name, "public", text)
                 except Exception:
                     pass
+        if hasattr(self, "ark_tree"):
+            for idx, text in results.get("ark", {}).items():
+                if self.ark_tree.exists(idx):
+                    try:
+                        self.ark_tree.set(idx, "public", text)
+                    except Exception:
+                        pass
 
     # ---- アプリ内アップデート通知(GitHub Releases) ----
     def _update_check_once(self) -> None:
@@ -1405,20 +1439,22 @@ class App(tk.Tk):
         top = ttk.LabelFrame(parent, text="🦖 ARK サーバー(ホスト・複数マップ対応)")
         top.pack(fill=tk.X, padx=8, pady=(8, 0))
         h = min(7, max(3, len(self.arkhosts)))
-        self.ark_tree = ttk.Treeview(top, columns=("status", "players"),
+        self.ark_tree = ttk.Treeview(top, columns=("status", "public", "players"),
                                      show="tree headings", height=h)
         self.ark_tree.heading("#0", text="サーバー")
         self.ark_tree.heading("status", text="状態")
+        self.ark_tree.heading("public", text="外部公開")
         self.ark_tree.heading("players", text="人数")
         self.ark_tree.column("#0", width=280)
-        self.ark_tree.column("status", width=110, anchor=tk.CENTER)
+        self.ark_tree.column("status", width=100, anchor=tk.CENTER)
+        self.ark_tree.column("public", width=90, anchor=tk.CENTER)
         self.ark_tree.column("players", width=70, anchor=tk.CENTER)
         self.ark_tree.pack(fill=tk.X, padx=6, pady=(6, 0))
         for i, ah in enumerate(self.arkhosts):
             port = ah.cfg.game_port
             label = ah.cfg.display_name + (f"  (:{port})" if port else "")
             self.ark_tree.insert("", tk.END, iid=str(i), text=label,
-                                 values=("確認中…", "-"))
+                                 values=("確認中…", "…", "-"))
         for tag, color in TAG_COLORS.items():
             self.ark_tree.tag_configure(tag, foreground=color)
 
@@ -1623,9 +1659,11 @@ class App(tk.Tk):
             first_seen = False
             for i, (running, players, gamelog) in enumerate(results):
                 pc = self._ark_player_count(players) if running else "-"
-                self.ark_tree.item(
-                    str(i), values=("🟢 稼働中" if running else "⚪ 停止中", pc),
-                    tags=("active" if running else "off",))
+                # public列は外部公開監視が更新するので触らない(set で個別更新)
+                self.ark_tree.set(str(i), "status",
+                                  "🟢 稼働中" if running else "⚪ 停止中")
+                self.ark_tree.set(str(i), "players", pc)
+                self.ark_tree.item(str(i), tags=("active" if running else "off",))
                 prev = self._ark_running.get(i)           # None=初回(未取得)
                 self._ark_running[i] = running
                 if prev is None:
