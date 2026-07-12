@@ -69,6 +69,7 @@ class AppConfig:
     ark_steamcmd: str = ""                 # SteamCMD.exe のパス(更新用。ARK/Palworldで共有)
     pal_hosts: list = field(default_factory=list)  # ホストで動くPalworldサーバー群
     backup: BackupConfig | None = None     # バックアップ設定(未設定可)
+    curseforge_api_key: str = ""           # CurseForge APIキー(mod検索/導入用。未設定可)
 
 
 class ConfigError(Exception):
@@ -248,7 +249,11 @@ def load_config(path: str | Path) -> AppConfig:
             compress=bool(bk_raw.get("compress", True)),
         )
 
+    cf_raw = raw.get("curseforge") or {}
+    curseforge_api_key = str(cf_raw.get("api_key") or "")
+
     return AppConfig(hyperv=hyperv, servers=servers, mysql=mysql, dns=dns,
                      network=network, publish=publish, mod_sync=mod_sync,
+                     curseforge_api_key=curseforge_api_key,
                      ark_hosts=ark_hosts, ark_steamcmd=raw.get("ark_steamcmd", ""),
                      pal_hosts=pal_hosts, backup=backup)

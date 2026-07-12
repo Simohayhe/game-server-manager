@@ -10,10 +10,14 @@ mods場所・所有者は GameServerProfile.mods_dir / runtime_user から取る
 """
 from __future__ import annotations
 
+import json
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import paramiko
+
+from . import onlinemods
 
 
 class ModError(Exception):
@@ -192,6 +196,119 @@ echo MODMGR_OK
         _sudo_run(client, profile.ssh_password, script)
     finally:
         client.close()
+
+
+_META_SCRIPT = r"""
+import os, sys, zipfile, json
+d = sys.argv[1]
+try:
+    names = sorted(f for f in os.listdir(d) if f.lower().endswith('.jar'))
+except Exception:
+    names = []
+for fn in names:
+    info = {'file': fn, 'id': None, 'name': fn, 'version': '?'}
+    try:
+        z = zipfile.ZipFile(os.path.join(d, fn))
+        j = json.loads(z.read('fabric.mod.json').decode('utf-8', 'replace'))
+        info['id'] = j.get('id')
+        info['name'] = j.get('name') or fn
+        info['version'] = str(j.get('version') or '?')
+    except Exception:
+        pass
+    print(json.dumps(info))
+"""
+
+
+def list_installed_meta(profile) -> list[dict]:
+    """サーバーの mods/ の各jarから fabric.mod.json を読み、
+    [{file, id, name, version}] を返す(VM上のpython3で抽出。sudo不要)。"""
+    client = _connect(profile)
+    try:
+        sftp = client.open_sftp()
+        with sftp.open("/tmp/gsm_modmeta.py", "w") as f:
+            f.write(_META_SCRIPT)
+        sftp.close()
+        _, stdout, _ = client.exec_command(
+            f"python3 /tmp/gsm_modmeta.py '{profile.mods_dir}'", timeout=60)
+        out = stdout.read().decode("utf-8", "replace")
+    finally:
+        client.close()
+    mods = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                mods.append(json.loads(line))
+            except ValueError:
+                pass
+    return mods
+
+
+def install_online(profile, entries: list[dict], restart: bool = True,
+                   progress=lambda t: None) -> list[str]:
+    """onlinemods.collect_with_deps の結果(entryのリスト)をDLしてサーバーに導入する。"""
+    entries = [e for e in entries if isinstance(e, dict) and e.get("url")]
+    if not entries:
+        raise ModError("導入するファイルがありません")
+    tmp = Path(tempfile.mkdtemp(prefix="gsm_mods_"))
+    paths = []
+    for e in entries:
+        dest = tmp / e["filename"]
+        progress(f"ダウンロード中: {e['name']} {e.get('version','')}")
+        onlinemods.download(e["url"], str(dest))
+        paths.append(str(dest))
+    add_mods(profile, paths, restart=restart, progress=progress)
+    return [e["filename"] for e in entries]
+
+
+def check_updates_modrinth(profile, mcver: str,
+                           progress=lambda t: None) -> list[dict]:
+    """導入済みjarのSHA1をModrinthに照会し、更新有無を判定する。
+
+    戻り値: [{file, name, current, latest, update, source}] 。
+      source='modrinth'=判定できた / 'unknown'=Modrinth未登録(CF等)で判定不可。
+    """
+    import hashlib
+    import urllib.error
+    import urllib.request
+
+    client = _connect(profile)
+    try:
+        _, stdout, _ = client.exec_command(
+            f"sha1sum '{profile.mods_dir}'/*.jar 2>/dev/null", timeout=60)
+        raw = stdout.read().decode("utf-8", "replace")
+    finally:
+        client.close()
+    hashes = {}                                   # sha1 -> filename
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            hashes[parts[0]] = Path(parts[-1]).name
+
+    out = []
+    for sha1, fname in hashes.items():
+        rec = {"file": fname, "name": fname, "current": "?",
+               "latest": None, "update": False, "source": "unknown"}
+        try:
+            req = urllib.request.Request(
+                f"https://api.modrinth.com/v2/version_file/{sha1}?algorithm=sha1",
+                headers={"User-Agent": "game-server-manager"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                ver = json.load(r)
+            rec["source"] = "modrinth"
+            rec["current"] = ver.get("version_number", "?")
+            pid = ver.get("project_id")
+            latest = onlinemods.resolve_modrinth(pid, mcver)  # 最新
+            rec["name"] = latest.get("name", fname)
+            rec["latest"] = latest.get("version")
+            rec["update"] = bool(rec["latest"] and rec["latest"] != rec["current"])
+        except (urllib.error.HTTPError, onlinemods.ModSearchError):
+            pass                                  # Modrinth未登録 or 対応版なし
+        except Exception:
+            pass
+        out.append(rec)
+        progress(f"更新確認: {rec['name']}")
+    return out
 
 
 def apply_pack(profile, library: ModLibrary, version: str, pack: str,

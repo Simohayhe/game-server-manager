@@ -23,8 +23,8 @@ from core.config import AppConfig, load_config
 from core.gameserver import GameServer
 from core.hyperv import HyperVManager
 from core import (arkconfig, arkupdate, backup, conntest, dnsreg, dynconfig,
-                  moddeploy, modmanager, netscan, notify, palconfig, palupdate,
-                  portsync, publish, scheduler, serverconfig, settings,
+                  moddeploy, modmanager, netscan, notify, onlinemods, palconfig,
+                  palupdate, portsync, publish, scheduler, serverconfig, settings,
                   updatecheck, upnp)
 from core.orchestration import (change_vm_ip, individualize_clone,
                                 start_server_with_vm)
@@ -1037,6 +1037,7 @@ class App(tk.Tk):
         self.sv_menu.add_command(label="ℹ サーバー情報", command=self._sv_info)
         self.sv_menu.add_command(label="⚙ 詳細設定", command=self._sv_server_config)
         self.sv_menu.add_command(label="💾 バックアップ/復元", command=self._sv_backup_open)
+        self.sv_menu.add_command(label="🧩 Mod管理", command=self._sv_mod_manager)
         quick_menu = tk.Menu(self.sv_menu, tearoff=0)
         for label, cmd in [("💾 ワールド保存(save-all)", "save-all"),
                            ("☀ 時間を昼に(time set day)", "time set day"),
@@ -4490,6 +4491,223 @@ class App(tk.Tk):
                    command=lambda: do_save(True)).pack(side=tk.RIGHT, padx=6)
         ttk.Button(btns, text="保存のみ",
                    command=lambda: do_save(False)).pack(side=tk.RIGHT)
+
+    def _sv_mod_manager(self) -> None:
+        server = self._selected_server()
+        if server is None:
+            messagebox.showinfo("選択なし", "サーバーを選んでください")
+            return
+        p = server.profile
+        if p.game != "minecraft":
+            messagebox.showinfo("未対応", "Mod管理はMinecraft(Fabric)サーバー用です。")
+            return
+        self._open_mod_manager_dialog(p)
+
+    def _open_mod_manager_dialog(self, p) -> None:
+        api_key = self.config_data.curseforge_api_key
+        dlg = tk.Toplevel(self)
+        dlg.title(f"🧩 Mod管理 — {p.display_name}")
+        dlg.geometry("860x640+%d+%d"
+                     % (self.winfo_rootx() + 120, self.winfo_rooty() + 40))
+        dlg.transient(self)
+        frm = ttk.Frame(dlg, padding=10)
+        frm.pack(fill=tk.BOTH, expand=True)
+        state = {"installed": [], "results": []}
+
+        top = ttk.Frame(frm)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="MCバージョン:").pack(side=tk.LEFT)
+        mcver_var = tk.StringVar(value="")
+        ttk.Entry(top, textvariable=mcver_var, width=12).pack(side=tk.LEFT, padx=(4, 8))
+        status_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=status_var, foreground=PAL["muted"]).pack(side=tk.LEFT)
+        if not api_key:
+            ttk.Label(top, text="(CurseForgeキー未設定=Modrinthのみ)",
+                      foreground="#ffd166").pack(side=tk.RIGHT)
+
+        def busy(msg=""):
+            status_var.set(msg)
+            dlg.update_idletasks()
+
+        def detect_mcver(mods):
+            fa = next((m for m in mods if m.get("id") == "fabric-api"), None)
+            if fa and "+" in fa.get("version", ""):
+                return fa["version"].split("+")[-1]
+            return ""
+
+        # --- 導入済みMod ---
+        inst_lf = ttk.LabelFrame(frm, text="導入済みMod")
+        inst_lf.pack(fill=tk.BOTH, expand=True, pady=(8, 4))
+        inst_tree = ttk.Treeview(inst_lf, columns=("version", "update"),
+                                 show="tree headings", height=8)
+        inst_tree.heading("#0", text="Mod")
+        inst_tree.heading("version", text="現在の版")
+        inst_tree.heading("update", text="更新")
+        inst_tree.column("#0", width=300)
+        inst_tree.column("version", width=220, anchor=tk.CENTER)
+        inst_tree.column("update", width=160, anchor=tk.CENTER)
+        inst_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+
+        def refresh_installed():
+            busy("導入済みModを取得中…")
+            self._submit(
+                lambda: modmanager.list_installed_meta(p),
+                lambda mods, err: _installed_done(mods, err))
+
+        def _installed_done(mods, err):
+            if err is not None or not dlg.winfo_exists():
+                busy(f"取得失敗: {err}" if err else "")
+                return
+            state["installed"] = mods
+            inst_tree.delete(*inst_tree.get_children())
+            for i, m in enumerate(mods):
+                inst_tree.insert("", tk.END, iid=str(i), text=m["name"],
+                                 values=(m["version"], ""))
+            if not mcver_var.get():
+                mcver_var.set(detect_mcver(mods))
+            busy(f"導入済み {len(mods)} 件")
+
+        def check_updates():
+            mc = mcver_var.get().strip()
+            if not mc:
+                messagebox.showwarning("MCバージョン", "MCバージョンを入力してください",
+                                       parent=dlg)
+                return
+            busy("更新を確認中…(Modrinth照合)")
+            self._submit(
+                lambda: modmanager.check_updates_modrinth(p, mc),
+                lambda ups, err: _updates_done(ups, err))
+
+        def _updates_done(ups, err):
+            if err is not None or not dlg.winfo_exists():
+                busy(f"更新確認失敗: {err}" if err else "")
+                return
+            by_file = {u["file"]: u for u in ups}
+            for i, m in enumerate(state["installed"]):
+                u = by_file.get(m["file"])
+                if not u:
+                    continue
+                if u["source"] != "modrinth":
+                    txt = "─(CFは再導入で更新)"
+                elif u["update"]:
+                    txt = f"🔺 {u['latest']}"
+                else:
+                    txt = "✓ 最新"
+                inst_tree.set(str(i), "update", txt)
+            busy("更新確認 完了")
+
+        def remove_selected():
+            sel = inst_tree.selection()
+            if not sel:
+                return
+            m = state["installed"][int(sel[0])]
+            if not messagebox.askyesno(
+                    "Mod削除",
+                    f"{m['name']} を削除してサーバーを再起動します。よろしいですか?\n"
+                    f"({m['file']})", parent=dlg):
+                return
+            busy("削除して再起動中…")
+            self._task_submit(
+                f"🗑 Mod削除: {m['name']} ({p.display_name})",
+                lambda: modmanager.remove_mods(p, [m["file"]], restart=True,
+                                               progress=self._progress_from_worker),
+                lambda _r, err: (busy("削除完了" if not err else f"失敗: {err}"),
+                                 refresh_installed()),
+                category="Mod管理", busy=False)
+
+        ib = ttk.Frame(inst_lf)
+        ib.pack(fill=tk.X, padx=6, pady=(0, 6))
+        ttk.Button(ib, text="🔄 一覧更新", command=refresh_installed).pack(side=tk.LEFT)
+        ttk.Button(ib, text="⬆ 更新確認", command=check_updates).pack(side=tk.LEFT, padx=6)
+        ttk.Button(ib, text="🗑 選択を削除", command=remove_selected).pack(side=tk.LEFT)
+
+        # --- 検索・追加 ---
+        src_lf = ttk.LabelFrame(frm, text="Mod検索・追加 (Modrinth + CurseForge / 依存は自動解決)")
+        src_lf.pack(fill=tk.BOTH, expand=True, pady=(6, 4))
+        sb = ttk.Frame(src_lf)
+        sb.pack(fill=tk.X, padx=6, pady=6)
+        q_var = tk.StringVar()
+        q_entry = ttk.Entry(sb, textvariable=q_var)
+        q_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        res_tree = ttk.Treeview(src_lf, columns=("source", "downloads"),
+                                show="tree headings", height=7)
+        res_tree.heading("#0", text="Mod")
+        res_tree.heading("source", text="ソース")
+        res_tree.heading("downloads", text="DL数")
+        res_tree.column("#0", width=360)
+        res_tree.column("source", width=110, anchor=tk.CENTER)
+        res_tree.column("downloads", width=110, anchor=tk.E)
+        res_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+
+        def do_search():
+            q = q_var.get().strip()
+            mc = mcver_var.get().strip()
+            if not q or not mc:
+                messagebox.showwarning(
+                    "入力", "MCバージョンと検索語を入力してください", parent=dlg)
+                return
+            busy(f"検索中…({q})")
+            self._submit(
+                lambda: onlinemods.search(q, mc, api_key),
+                lambda res, err: _search_done(res, err))
+
+        def _search_done(res, err):
+            if not dlg.winfo_exists():
+                return
+            if err is not None:
+                busy(f"検索失敗: {err}")
+                return
+            state["results"] = res
+            res_tree.delete(*res_tree.get_children())
+            for i, r in enumerate(res):
+                res_tree.insert("", tk.END, iid=str(i), text=r["name"],
+                                values=(r["source"], f"{r['downloads']:,}"))
+            busy(f"{len(res)} 件ヒット")
+
+        def install_selected():
+            sel = res_tree.selection()
+            if not sel:
+                return
+            r = state["results"][int(sel[0])]
+            mc = mcver_var.get().strip()
+            busy(f"依存を解決中…({r['name']})")
+            self._submit(
+                lambda: onlinemods.collect_with_deps(r["source"], r["id"], mc, api_key),
+                lambda coll, err: _install_resolved(r, coll, err))
+
+        def _install_resolved(r, coll, err):
+            if not dlg.winfo_exists():
+                return
+            if err is not None:
+                busy(f"解決失敗: {err}")
+                messagebox.showerror("導入エラー", str(err), parent=dlg)
+                return
+            warns = coll.pop("__warnings__", [])
+            entries = list(coll.values())
+            lines = "\n".join(f"・{e['name']}  {e['version']}" for e in entries)
+            msg = (f"{r['name']} を依存込みで {len(entries)} 個 導入し、"
+                   f"サーバーを再起動します。\n\n{lines}")
+            if warns:
+                msg += "\n\n⚠ 一部の依存はスキップ:\n" + "\n".join(f"・{w}" for w in warns)
+            if not messagebox.askyesno("Mod導入", msg, parent=dlg):
+                busy("")
+                return
+            busy("ダウンロードして導入中…")
+            self._task_submit(
+                f"🧩 Mod導入: {r['name']} ({p.display_name})",
+                lambda: modmanager.install_online(
+                    p, entries, restart=True, progress=self._progress_from_worker),
+                lambda _r, e2: (busy("導入完了" if not e2 else f"失敗: {e2}"),
+                                refresh_installed()),
+                category="Mod管理", busy=False)
+
+        ttk.Button(sb, text="🔍 検索", command=do_search).pack(side=tk.LEFT, padx=6)
+        q_entry.bind("<Return>", lambda _e: do_search())
+        ttk.Button(src_lf, text="⬇ 選択を導入(依存も自動)", command=install_selected
+                   ).pack(anchor=tk.W, padx=6, pady=(0, 8))
+
+        refresh_installed()
 
     def _sv_server_config(self) -> None:
         """サーバーの詳細設定(Minecraftはserver.properties)を編集するダイアログ。"""

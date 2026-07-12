@@ -68,6 +68,11 @@ backup:
   keep: 10
   compress: true
 
+# ==== CurseForge APIキー(任意・mod検索/導入で使用) ====
+# console.curseforge.com の API Keys で無料発行。Modrinthのみ使うなら不要。
+curseforge:
+  api_key: ''
+
 # ==== ゲームサーバープロファイル ====
 # 新しいゲームは1ブロック追加するだけで管理対象になる汎用設計。
 servers:
