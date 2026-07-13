@@ -2235,6 +2235,9 @@ class App(tk.Tk):
         restart_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(btns, text="保存後に選択マップを再起動",
                         variable=restart_var).pack(side=tk.LEFT, padx=10)
+        apply_all_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(btns, text="🔗 全マップに適用(設定共有)",
+                        variable=apply_all_var).pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="キャンセル", command=dialog.destroy).pack(side=tk.RIGHT)
         ttk.Button(btns, text="💾 保存",
                    command=lambda: _save()).pack(side=tk.RIGHT, padx=6)
@@ -2242,6 +2245,7 @@ class App(tk.Tk):
         def _save() -> None:
             changed = {"gus": False, "game": False}
             applied = []
+            changes = []                              # (fk, section, key, val) 全マップ適用用
             for fk, section, key, kind, getter, initial in fields:
                 val = getter()
                 if val == initial:
@@ -2259,6 +2263,7 @@ class App(tk.Tk):
                         return
                 inis[fk].set(section, key, val)
                 changed[fk] = True
+                changes.append((fk, section, key, val))
                 applied.append(f"{key}={val}")
             if not applied:
                 messagebox.showinfo("変更なし", "変更された項目はありません。", parent=dialog)
@@ -2271,6 +2276,8 @@ class App(tk.Tk):
                     restart = False
             dialog.destroy()
 
+            apply_all = apply_all_var.get()
+
             def job():
                 if changed["gus"]:
                     inis["gus"].save()
@@ -2278,6 +2285,26 @@ class App(tk.Tk):
                 if changed["game"]:
                     inis["game"].save()
                     self._progress_from_worker("Game.ini を保存")
+                if apply_all:                         # 全マップの config へ同じ変更を書く
+                    for other in self.arkhosts:
+                        cd = other.cfg.config_dir
+                        if str(cd) == str(config_dir):
+                            continue                  # 編集元(arkhosts[0])は保存済み
+                        try:
+                            g2, gm2 = arkconfig.load(cd)
+                        except Exception:
+                            continue
+                        objs = {"gus": g2, "game": gm2}
+                        did = {"gus": False, "game": False}
+                        for fk, section, key, val in changes:
+                            objs[fk].set(section, key, val)
+                            did[fk] = True
+                        if did["gus"]:
+                            g2.save()
+                        if did["game"]:
+                            gm2.save()
+                        self._progress_from_worker(
+                            f"{other.cfg.display_name} にも適用")
                 if restart and ah is not None:
                     self._progress_from_worker(f"{ah.cfg.display_name} を再起動(設定反映)…")
                     ah.restart_with_notice(progress=self._progress_from_worker)
