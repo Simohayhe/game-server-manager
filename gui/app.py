@@ -258,6 +258,26 @@ ARK_SETTINGS_TABS = [
         ("gus", _SS, "AutoSavePeriodMinutes", "float", "オートセーブ間隔(分)", "15"),
         ("gus", _GSESS, "MaxPlayers", "int", "最大プレイヤー数", "70"),
     ]),
+    ("転送・クラスタ", [
+        # クラスタ本体(clusterid/ClusterDirOverride)は各マップの launch_args で設定済み。
+        # ここはマップ間のアップロード/ダウンロード(転送)を細かく制御する項目。
+        ("gus", _SS, "NoTributeDownloads", "bool",
+         "転送のダウンロードを全面禁止(ONで持ち込み不可)", "False"),
+        ("gus", _SS, "PreventDownloadSurvivors", "bool", "キャラのダウンロードを禁止", "False"),
+        ("gus", _SS, "PreventDownloadItems", "bool", "アイテムのダウンロードを禁止", "False"),
+        ("gus", _SS, "PreventDownloadDinos", "bool", "恐竜のダウンロードを禁止", "False"),
+        ("gus", _SS, "PreventUploadSurvivors", "bool", "キャラのアップロードを禁止", "False"),
+        ("gus", _SS, "PreventUploadItems", "bool", "アイテムのアップロードを禁止", "False"),
+        ("gus", _SS, "PreventUploadDinos", "bool", "恐竜のアップロードを禁止", "False"),
+        ("gus", _SS, "CrossARKAllowForeignDinoDownloads", "bool",
+         "他クラスタの恐竜ダウンロードを許可", "False"),
+        ("gus", _SS, "TributeItemExpirationSeconds", "int",
+         "アップロードしたアイテムの保持秒数(既定86400=24h)", "86400"),
+        ("gus", _SS, "TributeDinoExpirationSeconds", "int",
+         "アップロードした恐竜の保持秒数", "86400"),
+        ("gus", _SS, "TributeCharacterExpirationSeconds", "int",
+         "アップロードしたキャラの保持秒数", "86400"),
+    ]),
 ]
 
 # Palworld詳細設定エディタ。(iniキー, 種別, 日本語ラベル, 既定値, choices)
