@@ -72,7 +72,10 @@ def build_content(values: dict) -> str:
 
 
 def write_file(file_path: str | Path, values: dict) -> None:
-    Path(file_path).write_text(build_content(values), encoding="utf-8")
+    # build_content は既に \r\n を含むので、テキストモードの改行変換(\n→\r\n)で
+    # \r\r\n に二重化しないよう newline="" で「変換なし」で書く。
+    Path(file_path).write_text(
+        build_content(values), encoding="utf-8", newline="")
 
 
 def _make_handler(file_path: str):
