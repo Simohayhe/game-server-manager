@@ -258,6 +258,22 @@ ARK_SETTINGS_TABS = [
         ("gus", _SS, "AutoSavePeriodMinutes", "float", "オートセーブ間隔(分)", "15"),
         ("gus", _GSESS, "MaxPlayers", "int", "最大プレイヤー数", "70"),
     ]),
+    ("クライオポッド", [
+        # ASAで低温ポッドは「起動中のクライオ冷蔵庫の近く」でしか出せない仕様。以下で緩和できる。
+        ("gus", _SS, "DisableCryopodFridgeRequirement", "bool",
+         "冷蔵庫なしでポッドを出せる(ONで冷蔵庫不要)", "False"),
+        ("gus", _SS, "DisableCryopodEnemyCheck", "bool",
+         "敵/構造物チェックを無視して出せる", "False"),
+        ("gus", _SS, "AllowCryoFridgeOnSaddle", "bool",
+         "サドル/イカダにクライオ冷蔵庫を設置可", "False"),
+        ("gus", _SS, "EnableCryopodNerf", "bool",
+         "ポッドから出した直後のデバフを有効化", "True"),
+        ("gus", _SS, "CryopodNerfDuration", "int", "デバフの継続時間(秒)", "10"),
+        ("gus", _SS, "CryopodNerfIncomingDamageMultPercent", "float",
+         "デバフ中の被ダメージ倍率(例0.25)", "0.25"),
+        ("gus", _SS, "EnableCryoSicknessPVE", "bool",
+         "PvEでもクライオ酔いを有効化", "False"),
+    ]),
     ("転送・クラスタ", [
         # クラスタ本体(clusterid/ClusterDirOverride)は各マップの launch_args で設定済み。
         # ここはマップ間のアップロード/ダウンロード(転送)を細かく制御する項目。
