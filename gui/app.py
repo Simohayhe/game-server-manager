@@ -15,7 +15,7 @@ import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from core import provision
 from core.arkhost import ArkHost
@@ -4679,11 +4679,38 @@ class App(tk.Tk):
                                  refresh_installed()),
                 category="Mod管理", busy=False)
 
+        def export_zip():
+            dest = filedialog.asksaveasfilename(
+                parent=dlg, title="クライアント用modのZIP保存先",
+                defaultextension=".zip", initialfile=f"{p.name}_mods.zip",
+                filetypes=[("ZIPファイル", "*.zip")])
+            if not dest:
+                return
+            busy("modをZIPに書き出し中…")
+
+            def done(n, err):
+                if err:
+                    busy(f"書き出し失敗: {err}")
+                    messagebox.showerror("失敗", str(err), parent=dlg)
+                else:
+                    busy(f"書き出し完了: {n}個 → {dest}")
+                    messagebox.showinfo(
+                        "ZIP書き出し完了",
+                        f"{n}個のmodをZIPにまとめました:\n{dest}\n\n"
+                        "クライアントの .minecraft/mods に解凍して入れてください"
+                        "(Fabric Loaderも同じMC版で導入)。", parent=dlg)
+            self._submit(
+                lambda: modmanager.export_mods_zip(
+                    p, dest, progress=self._progress_from_worker),
+                done)
+
         ib = ttk.Frame(inst_lf)
         ib.pack(fill=tk.X, padx=6, pady=(0, 6))
         ttk.Button(ib, text="🔄 一覧更新", command=refresh_installed).pack(side=tk.LEFT)
         ttk.Button(ib, text="⬆ 更新確認", command=check_updates).pack(side=tk.LEFT, padx=6)
         ttk.Button(ib, text="🗑 選択を削除", command=remove_selected).pack(side=tk.LEFT)
+        ttk.Button(ib, text="📦 クライアント用ZIP書き出し",
+                   command=export_zip).pack(side=tk.LEFT, padx=6)
 
         # --- 検索・追加 ---
         src_lf = ttk.LabelFrame(frm, text="Mod検索・追加 (Modrinth + CurseForge / 依存は自動解決)")

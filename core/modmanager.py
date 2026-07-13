@@ -244,6 +244,40 @@ def list_installed_meta(profile) -> list[dict]:
     return mods
 
 
+def export_mods_zip(profile, dest_zip: str | Path,
+                    progress=lambda t: None) -> int:
+    """サーバーの mods/ の全jarをローカルにDLして dest_zip に1つのZIPへまとめる。
+
+    クライアント(自分/友達)の .minecraft/mods にそのまま入れて使う用。導入したjar数を返す。
+    """
+    import tempfile
+    import zipfile
+
+    client = _connect(profile)
+    try:
+        sftp = client.open_sftp()
+        names = sorted(f for f in sftp.listdir(profile.mods_dir)
+                       if f.lower().endswith(".jar"))
+        if not names:
+            raise ModError("mods フォルダに jar がありません")
+        tmp = Path(tempfile.mkdtemp(prefix="gsm_modszip_"))
+        locals_ = []
+        for i, fn in enumerate(names, 1):
+            progress(f"取得中 ({i}/{len(names)}): {fn}")
+            lp = tmp / fn
+            sftp.get(f"{profile.mods_dir}/{fn}", str(lp))
+            locals_.append(lp)
+        sftp.close()
+    finally:
+        client.close()
+    progress("ZIPにまとめ中…")
+    with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED) as z:
+        for lp in locals_:
+            z.write(lp, lp.name)
+    progress(f"完了: {len(locals_)}個 → {dest_zip}")
+    return len(locals_)
+
+
 def install_online(profile, entries: list[dict], restart: bool = True,
                    progress=lambda t: None) -> list[str]:
     """onlinemods.collect_with_deps の結果(entryのリスト)をDLしてサーバーに導入する。"""
