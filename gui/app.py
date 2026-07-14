@@ -2712,8 +2712,11 @@ class App(tk.Tk):
         self._sched_refresh_tree()
 
     def _sched_targets(self) -> list[tuple[str, str, str, str]]:
-        """選択肢: (表示ラベル, kind, target, display)。ARKマップ + MCサーバー。"""
+        """選択肢: (表示ラベル, kind, target, display)。ARK全マップ/各マップ + MCサーバー。"""
         out = []
+        if self.arkhosts:
+            out.append(("🦖 ARK 全マップ(停止中は自動スキップ)", "ark-all", "*",
+                        "ARK 全マップ"))
         for ah in self.arkhosts:
             out.append((f"🦖 {ah.cfg.display_name}", "ark", ah.cfg.map_label,
                         ah.cfg.display_name))
@@ -2729,7 +2732,8 @@ class App(tk.Tk):
     def _sched_refresh_tree(self) -> None:
         self.sched_tree.delete(*self.sched_tree.get_children())
         for job in self.schedules:
-            kind = "🦖ARK" if job.kind == "ark" else "🟩MC"
+            kind = ("🦖ARK全" if job.kind == "ark-all"
+                    else "🦖ARK" if job.kind == "ark" else "🟩MC")
             act = " → ".join(
                 ([("💾バックアップ")] if job.do_backup else [])
                 + (["🔁再起動"] if job.do_restart else [])) or "(なし)"
@@ -2924,6 +2928,9 @@ class App(tk.Tk):
 
     def _sched_fire(self, job) -> None:
         """予約の発火。do_backup/do_restart に応じて バックアップ → 再起動 を実行。"""
+        if job.kind == "ark-all":
+            self._sched_fire_ark_all(job)
+            return
         if job.do_backup and job.do_restart:
             # バックアップ完了後に再起動(1ジョブでまとめて)
             self._sched_fire_backup(job, then=lambda: self._sched_do_restart(job))
@@ -2931,6 +2938,33 @@ class App(tk.Tk):
             self._sched_fire_backup(job)
         elif job.do_restart:
             self._sched_do_restart(job)
+
+    def _sched_fire_ark_all(self, job) -> None:
+        """ARK全マップの予約。マップごとに(バックアップ/再起動)を順に実行する。
+        再起動は稼働中マップのみ(停止中はスキップ)。ワーカーは直列処理なので順に走る。"""
+        respawn = self.ark_respawn_on_restart
+        for i, ah in enumerate(self.arkhosts):
+            self._mark_restart(f"ark:{i}")
+
+            def job_fn(ah=ah):
+                if job.do_backup:
+                    saved_root = str(backup.ark_saved_dir(ah.cfg.config_dir))
+                    self._progress_from_worker(f"{ah.cfg.display_name}: バックアップ中…")
+                    backup.ark_backup(saved_root, self.backupcfg, ah.cfg.map_label,
+                                      ah.cfg.save_subdir,
+                                      progress=self._progress_from_worker)
+                if job.do_restart:
+                    if not ah.is_running():
+                        self._progress_from_worker(
+                            f"{ah.cfg.display_name}: 停止中のため再起動スキップ")
+                        return "skipped"
+                    ah.restart_with_notice(respawn_dinos=respawn,
+                                           progress=self._progress_from_worker)
+                return "done"
+            self._task_submit(
+                f"⏰ 予約({job.action_text()}): {ah.cfg.display_name}", job_fn,
+                self._ark_action_done(f"⏰ {ah.cfg.display_name}: 完了", 3000),
+                category="予約(全マップ)", busy=False)
 
     def _sched_do_restart(self, job) -> None:
         """予約再起動の実行(ARK/MC)。停止中はスキップ。タスク画面に記録。"""
