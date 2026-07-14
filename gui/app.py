@@ -2785,8 +2785,8 @@ class App(tk.Tk):
         dialog.title("再起動予約の編集" if job else "再起動予約の追加")
         dialog.transient(self)
         dialog.grab_set()
-        dialog.geometry("470x400+%d+%d"
-                        % (self.winfo_rootx() + 200, self.winfo_rooty() + 80))
+        dialog.geometry("520x600+%d+%d"
+                        % (self.winfo_rootx() + 200, self.winfo_rooty() + 60))
         form = ttk.Frame(dialog, padding=12)
         form.pack(fill=tk.BOTH, expand=True)
 
@@ -2835,12 +2835,51 @@ class App(tk.Tk):
         ttk.Label(act_frame, foreground=PAL["muted"],
                   text="両方ONで「バックアップ → 再起動」をまとめて実行").pack(anchor=tk.W)
 
+        # --- ローリング再起動(ARK全マップ用) ---
+        rolling_var = tk.BooleanVar(value=job.rolling if job else False)
+        ttk.Checkbutton(
+            form, text="🔄 ローリング再起動(1台ずつ順に・前が復帰してから次へ)",
+            variable=rolling_var).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
         ttk.Label(form, foreground=PAL["muted"],
-                  text="🦕 ARK再起動時の恐竜リスポーンは ⚙詳細設定 のトグルで一括設定").grid(
-            row=6, column=1, sticky=tk.W, pady=(6, 0))
+                  text="↓ 上から順に再起動(↑↓で並べ替え)。ARK全マップ選択時に有効").grid(
+            row=7, column=0, columnspan=2, sticky=tk.W)
+        ord_frame = ttk.Frame(form)
+        ord_frame.grid(row=8, column=0, columnspan=2, sticky=tk.W, pady=(2, 4))
+        order_lb = tk.Listbox(ord_frame, height=6, width=36, exportselection=False)
+        order_lb.pack(side=tk.LEFT)
+        ark_items = [(a.cfg.display_name, a.cfg.map_label) for a in self.arkhosts]
+        if job and job.order:            # 保存済みの順を優先(漏れは末尾)
+            ordered = [it for lbl in job.order for it in ark_items if it[1] == lbl]
+            ordered += [it for it in ark_items if it[1] not in job.order]
+            ark_items = ordered
+        for disp, _lbl in ark_items:
+            order_lb.insert(tk.END, disp)
+        order_state = list(ark_items)
+
+        def _move(delta):
+            sel = order_lb.curselection()
+            if not sel:
+                return
+            i = sel[0]
+            k = i + delta
+            if not (0 <= k < len(order_state)):
+                return
+            order_state[i], order_state[k] = order_state[k], order_state[i]
+            order_lb.delete(0, tk.END)
+            for d, _l in order_state:
+                order_lb.insert(tk.END, d)
+            order_lb.selection_set(k)
+        obtn = ttk.Frame(ord_frame)
+        obtn.pack(side=tk.LEFT, padx=6, anchor=tk.N)
+        ttk.Button(obtn, text="↑", width=3, command=lambda: _move(-1)).pack(pady=2)
+        ttk.Button(obtn, text="↓", width=3, command=lambda: _move(1)).pack(pady=2)
+
+        ttk.Label(form, foreground=PAL["muted"],
+                  text="🦕 恐竜リスポーンは ⚙詳細設定 のトグルで一括設定").grid(
+            row=9, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
         enabled_var = tk.BooleanVar(value=job.enabled if job else True)
         ttk.Checkbutton(form, text="有効", variable=enabled_var).grid(
-            row=7, column=1, sticky=tk.W, pady=6)
+            row=10, column=0, columnspan=2, sticky=tk.W, pady=6)
 
         def ok() -> None:
             raw = [scheduler.normalize_time(t) for t in times_var.get().split(",") if t.strip()]
@@ -2857,23 +2896,27 @@ class App(tk.Tk):
                     "入力エラー", "「バックアップ」「再起動」の少なくとも一方を選んでください",
                     parent=dialog)
                 return
+            rolling = rolling_var.get()
+            order = [lbl for _d, lbl in order_state]
             tgt = targets[labels.index(tgt_var.get())]
             if job is None:
                 new = scheduler.RestartJob(
                     id=uuid.uuid4().hex[:8], kind=tgt[1], target=tgt[2],
                     display=tgt[3], times=times, days=days, enabled=enabled_var.get(),
-                    do_backup=do_backup, do_restart=do_restart)
+                    do_backup=do_backup, do_restart=do_restart,
+                    rolling=rolling, order=order)
                 self.schedules.append(new)
             else:
                 job.kind, job.target, job.display = tgt[1], tgt[2], tgt[3]
                 job.times, job.days, job.enabled = times, days, enabled_var.get()
                 job.do_backup, job.do_restart = do_backup, do_restart
+                job.rolling, job.order = rolling, order
             self._sched_save()
             self._sched_refresh_tree()
             dialog.destroy()
 
         bar = ttk.Frame(form)
-        bar.grid(row=8, column=0, columnspan=2, pady=(10, 0))
+        bar.grid(row=11, column=0, columnspan=2, pady=(10, 0))
         ttk.Button(bar, text="保存", command=ok).pack(side=tk.LEFT, padx=6)
         ttk.Button(bar, text="キャンセル", command=dialog.destroy).pack(side=tk.LEFT)
 
@@ -2941,8 +2984,41 @@ class App(tk.Tk):
 
     def _sched_fire_ark_all(self, job) -> None:
         """ARK全マップの予約。マップごとに(バックアップ/再起動)を順に実行する。
-        再起動は稼働中マップのみ(停止中はスキップ)。ワーカーは直列処理なので順に走る。"""
+        再起動は稼働中マップのみ(停止中はスキップ)。ワーカーは直列処理なので順に走る。
+        rolling=True なら指定順(job.order)に1台ずつ、前が復帰してから次へ。"""
         respawn = self.ark_respawn_on_restart
+        if job.rolling:
+            order = job.order or [a.cfg.map_label for a in self.arkhosts]
+            seq = [a for lbl in order
+                   for a in self.arkhosts if a.cfg.map_label == lbl]
+            seq += [a for a in self.arkhosts if a not in seq]   # 漏れは末尾
+            idx = {a: i for i, a in enumerate(self.arkhosts)}
+
+            def job_fn():
+                for ah in seq:
+                    if job.do_backup:
+                        self._progress_from_worker(f"{ah.cfg.display_name}: バックアップ中…")
+                        backup.ark_backup(
+                            str(backup.ark_saved_dir(ah.cfg.config_dir)), self.backupcfg,
+                            ah.cfg.map_label, ah.cfg.save_subdir,
+                            progress=self._progress_from_worker)
+                    if job.do_restart:
+                        if not ah.is_running():
+                            self._progress_from_worker(
+                                f"{ah.cfg.display_name}: 停止中のためスキップ")
+                            continue
+                        self._mark_restart(f"ark:{idx[ah]}")
+                        self._progress_from_worker(f"{ah.cfg.display_name}: 再起動中…")
+                        ah.restart_with_notice(respawn_dinos=respawn,
+                                               progress=self._progress_from_worker)
+                        self._progress_from_worker(f"{ah.cfg.display_name}: 復帰待ち…")
+                        ah.wait_ready(progress=self._progress_from_worker)
+                return "done"
+            self._task_submit(
+                f"⏰ ローリング({job.action_text()}): ARK全マップ", job_fn,
+                self._ark_action_done("⏰ ローリング完了", 3000),
+                category="予約(ローリング)", busy=False)
+            return
         for i, ah in enumerate(self.arkhosts):
             self._mark_restart(f"ark:{i}")
 

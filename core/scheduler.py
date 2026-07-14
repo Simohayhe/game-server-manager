@@ -27,6 +27,8 @@ class RestartJob:
     respawn_dinos: bool = False   # 再起動後に野生恐竜をリスポーン(ARKのみ)
     do_backup: bool = False       # バックアップを実行
     do_restart: bool = True       # 再起動を実行(両方ONならバックアップ→再起動)
+    rolling: bool = False         # ARK全マップ: 1台ずつ順に(前が復帰してから次)
+    order: list = field(default_factory=list)  # ローリング順(map_labelの並び)
 
     def action_text(self) -> str:
         parts = []
@@ -74,7 +76,9 @@ def load_jobs(path: str | Path) -> list[RestartJob]:
                 days=[int(d) for d in j.get("days", []) if 0 <= int(d) <= 6],
                 enabled=bool(j.get("enabled", True)),
                 respawn_dinos=bool(j.get("respawn_dinos", False)),
-                do_backup=do_backup, do_restart=do_restart))
+                do_backup=do_backup, do_restart=do_restart,
+                rolling=bool(j.get("rolling", False)),
+                order=list(j.get("order", []))))
         except (KeyError, TypeError, ValueError):
             continue
     return out
