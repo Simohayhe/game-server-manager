@@ -246,11 +246,20 @@ async def on_ready():
             g = discord.Object(id=int(GUILD_ID))
             tree.copy_global_to(guild=g)
             await tree.sync(guild=g)
+            print(f"コマンド同期: guild {GUILD_ID}")
+        elif client.guilds:
+            # 参加中の各サーバーへ即時同期(グローバル同期は反映が遅いため)
+            for g in client.guilds:
+                tree.copy_global_to(guild=g)
+                await tree.sync(guild=g)
+            print(f"コマンド同期: 参加中の {len(client.guilds)} サーバー "
+                  f"({', '.join(g.name for g in client.guilds)})")
         else:
             await tree.sync()
+            print("コマンド同期: グローバル(反映に時間がかかる場合あり)")
     except Exception as exc:                                   # noqa: BLE001
         print("コマンド同期に失敗:", exc)
-    print(f"ログイン: {client.user}  対象サーバー {len(TARGETS)}件")
+    print(f"ログイン成功: {client.user}  対象サーバー {len(TARGETS)}件")
 
 
 def main() -> None:
