@@ -73,6 +73,13 @@ backup:
 curseforge:
   api_key: ''
 
+# ==== Discordボット(任意・discordbot.py で使用) ====
+# Discord Developer Portal で Bot を作成しトークンを発行。python discordbot.py で常時起動。
+# discord:
+#   token: 'BOT_TOKEN'
+#   guild_id: 123456789012345678     # (任意)このサーバーにコマンドを即時反映
+#   admin_role_id: 123456789012345678 # (任意)このロールだけ操作可。未設定なら管理者権限が必要
+
 # ==== ゲームサーバープロファイル ====
 # 新しいゲームは1ブロック追加するだけで管理対象になる汎用設計。
 servers:

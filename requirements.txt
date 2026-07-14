@@ -2,4 +2,5 @@ paramiko>=3.0
 PyYAML>=6.0
 PyMySQL>=1.1
 ruamel.yaml>=0.18
+discord.py>=2.3          # Discordボット(discordbot.py)用。使わないなら不要
 # UPnPポート開放は標準ライブラリのみ(core/upnp.py)
