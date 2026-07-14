@@ -25,10 +25,16 @@ class RestartJob:
     days: list[int] = field(default_factory=list)    # 実行曜日 0=月..6=日。空=毎日
     enabled: bool = True
     respawn_dinos: bool = False   # 再起動後に野生恐竜をリスポーン(ARKのみ)
-    action: str = "restart"       # "restart"(再起動) or "backup"(バックアップ)
+    do_backup: bool = False       # バックアップを実行
+    do_restart: bool = True       # 再起動を実行(両方ONならバックアップ→再起動)
 
     def action_text(self) -> str:
-        return "バックアップ" if self.action == "backup" else "再起動"
+        parts = []
+        if self.do_backup:
+            parts.append("バックアップ")
+        if self.do_restart:
+            parts.append("再起動")
+        return " → ".join(parts) if parts else "(なし)"
 
     def times_text(self) -> str:
         return ", ".join(self.times) if self.times else "(なし)"
@@ -54,6 +60,13 @@ def load_jobs(path: str | Path) -> list[RestartJob]:
     out = []
     for j in data.get("jobs", []):
         try:
+            if "do_backup" in j or "do_restart" in j:
+                do_backup = bool(j.get("do_backup", False))
+                do_restart = bool(j.get("do_restart", True))
+            else:                              # 旧形式 action からの移行
+                act = j.get("action", "restart")
+                do_backup = (act == "backup")
+                do_restart = (act != "backup")
             out.append(RestartJob(
                 id=str(j["id"]), kind=j.get("kind", "mc"),
                 target=j.get("target", ""), display=j.get("display", ""),
@@ -61,7 +74,7 @@ def load_jobs(path: str | Path) -> list[RestartJob]:
                 days=[int(d) for d in j.get("days", []) if 0 <= int(d) <= 6],
                 enabled=bool(j.get("enabled", True)),
                 respawn_dinos=bool(j.get("respawn_dinos", False)),
-                action=j.get("action", "restart")))
+                do_backup=do_backup, do_restart=do_restart))
         except (KeyError, TypeError, ValueError):
             continue
     return out

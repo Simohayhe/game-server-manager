@@ -2730,7 +2730,9 @@ class App(tk.Tk):
         self.sched_tree.delete(*self.sched_tree.get_children())
         for job in self.schedules:
             kind = "🦖ARK" if job.kind == "ark" else "🟩MC"
-            act = "💾バックアップ" if job.action == "backup" else "🔁再起動"
+            act = " → ".join(
+                ([("💾バックアップ")] if job.do_backup else [])
+                + (["🔁再起動"] if job.do_restart else [])) or "(なし)"
             name = job.display
             self.sched_tree.insert(
                 "", tk.END, iid=job.id, text=name,
@@ -2819,12 +2821,15 @@ class App(tk.Tk):
         ttk.Label(form, foreground=PAL["muted"],
                   text="何も選ばない=毎日").grid(row=4, column=1, sticky=tk.W)
 
-        ttk.Label(form, text="動作:").grid(row=5, column=0, sticky=tk.W, pady=(8, 2))
-        action_var = tk.StringVar(
-            value="バックアップ" if (job and job.action == "backup") else "再起動")
-        ttk.Combobox(form, textvariable=action_var, state="readonly", width=16,
-                     values=["再起動", "バックアップ"]).grid(
-            row=5, column=1, sticky=tk.W, pady=(8, 2))
+        ttk.Label(form, text="動作:").grid(row=5, column=0, sticky=tk.NW, pady=(8, 2))
+        act_frame = ttk.Frame(form)
+        act_frame.grid(row=5, column=1, sticky=tk.W, pady=(8, 2))
+        backup_var = tk.BooleanVar(value=job.do_backup if job else False)
+        restart_var = tk.BooleanVar(value=job.do_restart if job else True)
+        ttk.Checkbutton(act_frame, text="💾 バックアップ", variable=backup_var).pack(anchor=tk.W)
+        ttk.Checkbutton(act_frame, text="🔁 再起動", variable=restart_var).pack(anchor=tk.W)
+        ttk.Label(act_frame, foreground=PAL["muted"],
+                  text="両方ONで「バックアップ → 再起動」をまとめて実行").pack(anchor=tk.W)
 
         ttk.Label(form, foreground=PAL["muted"],
                   text="🦕 ARK再起動時の恐竜リスポーンは ⚙詳細設定 のトグルで一括設定").grid(
@@ -2842,18 +2847,23 @@ class App(tk.Tk):
                                      parent=dialog)
                 return
             days = [i for i, dv in enumerate(day_vars) if dv.get()]  # 空=毎日
-            action = "backup" if action_var.get() == "バックアップ" else "restart"
+            do_backup, do_restart = backup_var.get(), restart_var.get()
+            if not (do_backup or do_restart):
+                messagebox.showerror(
+                    "入力エラー", "「バックアップ」「再起動」の少なくとも一方を選んでください",
+                    parent=dialog)
+                return
             tgt = targets[labels.index(tgt_var.get())]
             if job is None:
                 new = scheduler.RestartJob(
                     id=uuid.uuid4().hex[:8], kind=tgt[1], target=tgt[2],
                     display=tgt[3], times=times, days=days, enabled=enabled_var.get(),
-                    action=action)
+                    do_backup=do_backup, do_restart=do_restart)
                 self.schedules.append(new)
             else:
                 job.kind, job.target, job.display = tgt[1], tgt[2], tgt[3]
                 job.times, job.days, job.enabled = times, days, enabled_var.get()
-                job.action = action
+                job.do_backup, job.do_restart = do_backup, do_restart
             self._sched_save()
             self._sched_refresh_tree()
             dialog.destroy()
@@ -2886,8 +2896,8 @@ class App(tk.Tk):
         if job is None:
             messagebox.showinfo("選択なし", "テスト実行する予約を選んでください")
             return
-        note = ("(プレイヤーが居れば60秒予告してから再起動します)"
-                if job.action != "backup" else "(バックアップを今すぐ実行します)")
+        note = "(" + job.action_text() + " を今すぐ実行します"
+        note += "。再起動はプレイヤーが居れば60秒予告)" if job.do_restart else ")"
         if not messagebox.askyesno(
                 "確認", f"「{job.display}」の{job.action_text()}を今すぐ実行しますか?\n{note}",
                 icon="warning", default="no"):
@@ -2913,10 +2923,17 @@ class App(tk.Tk):
         self.after(SCHED_TICK_MS, self._sched_tick)
 
     def _sched_fire(self, job) -> None:
-        """予約の発火: 再起動 or バックアップ。停止中はスキップ。タスク画面に記録。"""
-        if job.action == "backup":
+        """予約の発火。do_backup/do_restart に応じて バックアップ → 再起動 を実行。"""
+        if job.do_backup and job.do_restart:
+            # バックアップ完了後に再起動(1ジョブでまとめて)
+            self._sched_fire_backup(job, then=lambda: self._sched_do_restart(job))
+        elif job.do_backup:
             self._sched_fire_backup(job)
-            return
+        elif job.do_restart:
+            self._sched_do_restart(job)
+
+    def _sched_do_restart(self, job) -> None:
+        """予約再起動の実行(ARK/MC)。停止中はスキップ。タスク画面に記録。"""
         if job.kind == "ark":
             ah = next((a for a in self.arkhosts if a.cfg.map_label == job.target), None)
             if ah is None:
@@ -2951,8 +2968,9 @@ class App(tk.Tk):
                 self._make_action_done(f"⏰ {server.profile.display_name} を予約再起動しました"),
                 category="予約再起動", busy=False)
 
-    def _sched_fire_backup(self, job) -> None:
-        """予約バックアップの発火(ARK=マップ別zip / MC=tar.gz)。"""
+    def _sched_fire_backup(self, job, then=None) -> None:
+        """予約バックアップの発火(ARK=マップ別zip / MC=tar.gz)。
+        then を渡すとバックアップ完了後(成否問わず)に呼ぶ=バックアップ→再起動の連鎖用。"""
         if job.kind == "ark":
             ah = next((a for a in self.arkhosts if a.cfg.map_label == job.target), None)
             if ah is None:
@@ -2990,6 +3008,8 @@ class App(tk.Tk):
                 name = Path(path).name if path else "?"
                 self._set_status(f"⏰ {disp} をバックアップしました: {name}")
                 self._notify("backup", f"💾 {disp} を自動バックアップしました\n{name}")
+            if then:                     # バックアップ後の再起動(成否に関わらず実行)
+                then()
         self._task_submit(f"⏰ 予約バックアップ: {disp}", job_fn, on_done,
                           category="予約バックアップ", busy=False)
 
