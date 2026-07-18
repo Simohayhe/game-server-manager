@@ -208,7 +208,10 @@ class SchedulerService:
             return "停止中スキップ"
         self._mark(ah, "restart")          # 予約再起動=意図的(復旧させない)
         respawn = self._respawn_flag()
-        ah.restart_with_notice(respawn_dinos=respawn, progress=self.jobs.progress)
+        # cancelable=True: プレイヤーがチャットに 'no' を送ると予約再起動を中止できる
+        if not ah.restart_with_notice(respawn_dinos=respawn, cancelable=True,
+                                      progress=self.jobs.progress):
+            return "プレイヤーがチャットで中止"
         ah.wait_ready(progress=self.jobs.progress)
         return "再起動"
 
@@ -286,8 +289,10 @@ class SchedulerService:
                     self.jobs.progress("停止中のため再起動スキップ")
                     out.append("停止中スキップ")
                 else:
-                    srv.restart_with_notice(progress=self.jobs.progress)  # 予告付き
-                    out.append("再起動")
+                    # cancelable=True: Minecraftはチャット 'no' で中止可(Palworldは読取不可)
+                    ok = srv.restart_with_notice(progress=self.jobs.progress,
+                                                 cancelable=True)
+                    out.append("再起動" if ok else "プレイヤーがチャットで中止")
             return " / ".join(out) or "(なし)"
         self.jobs.submit(f"⏰ 予約({job.action_text()}): {srv.profile.display_name}",
                          fn, lane=server_lane(job.target), category="予約")

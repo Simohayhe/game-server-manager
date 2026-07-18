@@ -16,7 +16,8 @@ from .transport import SSHTransport
 RCON_FAIL = "RCON接続不可"        # players() が失敗を示す接頭辞(player_count が判定に使う)
 
 NOTICE_MINUTES = (15, 10, 5, 1)   # 予告カウントダウンのタイミング(残り分・降順)
-PLAYER_POLL_SEC = 30              # カウントダウン中の在席チェック間隔(秒)
+POLL_SEC = 15                     # カウントダウン中の在席/チャット確認間隔(秒)
+CANCEL_WORDS = ("no",)            # チャットでこの単語(単独)を送ると再起動を中止
 
 
 @dataclass
@@ -137,41 +138,102 @@ class GameServer:
         except Exception:
             pass
 
-    def _notice_countdown(self, verb: str, progress, seconds=(60, 30, 10)) -> None:
-        """プレイヤーが居れば seconds の各タイミングで予告する(降順・Minecraft用)。"""
+    def _notice_countdown(self, verb: str, progress, seconds=(60, 30, 10),
+                          cancelable: bool = False) -> bool:
+        """プレイヤーが居れば seconds の各タイミングで予告する(降順・Minecraft用)。
+
+        cancelable=True で、チャットに 'no' が来たら中止(戻り値 False)。
+        Minecraftのチャットはサーバーログから読む。
+        """
         try:
             n = self.player_count()
         except Exception:
             n = None
         if not n or n <= 0:
-            return
+            return True
+        if cancelable:
+            self._mc_chat_watch_init()       # カウントダウン前の発言を無視する基準を作る
         items = sorted(seconds, reverse=True)
         for i, sec in enumerate(items):
+            hint = " (type 'no' in chat to cancel)" if cancelable else ""
             progress(f"予告(残り{sec}秒): {verb}")
-            self.announce(f"Server {verb} in {sec} seconds")
+            self.announce(f"Server {verb} in {sec} seconds{hint}")
             nxt = items[i + 1] if i + 1 < len(items) else 0
             wait = sec - nxt
             if wait > 0:
-                time.sleep(wait)
+                res = self._wait_countdown(wait, cancelable, progress)
+                if res == "cancel":
+                    self.announce(f"Server {verb} cancelled by player")
+                    progress(f"プレイヤーがチャットで中止 → {verb}を取り消しました")
+                    return False
+                if res == "empty":
+                    break                    # 無人になった → そのまま実行へ
+        return True
 
-    def restart_with_notice(self, progress=lambda t: None) -> None:
-        """プレイヤーが居れば予告してから再起動する。"""
+    def restart_with_notice(self, progress=lambda t: None,
+                            cancelable: bool = False) -> bool:
+        """プレイヤーが居れば予告してから再起動する。戻り値: 中止されたら False。"""
         if self.profile.game == "palworld":
-            self._palworld_notice("restart", progress)
-            return
-        self._notice_countdown("restart", progress)
+            self._palworld_notice("restart", progress)   # Palworldはチャット読取不可=中止不可
+            return True
+        if not self._notice_countdown("restart", progress, cancelable=cancelable):
+            return False                     # プレイヤーが中止 → 再起動しない
         self._save_world()
         progress("再起動中…")
         self.restart()
+        return True
 
     def stop_with_notice(self, progress=lambda t: None) -> None:
         if self.profile.game == "palworld":
             self._palworld_notice("stop", progress)
             return
-        self._notice_countdown("shutdown", progress)
+        self._notice_countdown("shutdown", progress)     # 停止は中止不可
         self._save_world()
         progress("停止中…")
         self.stop()
+
+    # ---- Minecraft: サーバーログからチャットを読んで中止ワードを検出 ----
+    def _mc_chat_watch_init(self) -> None:
+        """現在のログ末尾を『既読』として記録し、以降の新規発言だけを見る。"""
+        self._chat_seen: set[str] = set()
+        try:
+            for line in self.tail_log(60).splitlines():
+                self._chat_seen.add(line)
+        except Exception:
+            self._chat_seen = set()
+
+    def _mc_chat_has_cancel(self) -> bool:
+        """新規のチャット行に中止ワード(単独 no)があれば True。
+
+        Fabric/vanillaのチャットはログに `<Player> message` として出る。
+        """
+        try:
+            lines = self.tail_log(60).splitlines()
+        except Exception:
+            return False
+        seen = getattr(self, "_chat_seen", None)
+        if seen is None:
+            seen = self._chat_seen = set()
+        hit = False
+        for line in lines:
+            if line in seen:
+                continue
+            seen.add(line)
+            m = re.search(r"<[^>]+>\s+(.*)$", line)   # `<Player> message`
+            if m:
+                body = re.sub(r"[^a-z]", "", m.group(1).strip().lower())
+                if body in CANCEL_WORDS:
+                    hit = True
+        return hit
+
+    def _chat_cancel_hit(self) -> bool:
+        """このサーバーのチャットに中止ワードが来たか(ゲームごとに読み方が違う)。
+
+        Minecraft=ログ / Palworld=読取手段なし(常に False)。
+        """
+        if self.profile.game == "minecraft":
+            return self._mc_chat_has_cancel()
+        return False
 
     # ---- Palworld: 画面中央カウントダウン(Shutdown) + 在席監視で無人なら即実行 ----
     def _palworld_notice(self, action: str, progress) -> None:
@@ -198,7 +260,7 @@ class GameServer:
             progress(f"予告(残り{m}分): {jp}")
             nxt = mins[idx + 1] if idx + 1 < len(mins) else 0
             gap = (m - nxt) * 60
-            if gap and self._wait_or_empty(gap, progress):
+            if gap and self._wait_countdown(gap, False, progress) == "empty":
                 progress(f"プレイヤー不在を検知 → 待たずに{jp}します")
                 break
         self._pal_broadcast(f"Server {en} now")
@@ -212,19 +274,22 @@ class GameServer:
         except Exception:
             pass
 
-    def _wait_or_empty(self, seconds: int, progress=lambda t: None) -> bool:
-        """seconds秒待つ。POLL毎に在席確認し、0人になったら即Trueで戻る。"""
+    def _wait_countdown(self, seconds: int, cancelable: bool,
+                        progress=lambda t: None) -> str:
+        """seconds秒待つ。'cancel'=チャット中止 / 'empty'=無人 / ''=通常経過。"""
         waited = 0
         while waited < seconds:
-            step = min(PLAYER_POLL_SEC, seconds - waited)
+            step = min(POLL_SEC, seconds - waited)
             time.sleep(step)
             waited += step
+            if cancelable and self._chat_cancel_hit():
+                return "cancel"
             try:
                 if self.player_count() == 0:
-                    return True
+                    return "empty"
             except Exception:
                 pass
-        return False
+        return ""
 
     def _palworld_finalize(self, action: str, progress) -> None:
         """実際の停止・再起動を確定する(systemdで確実に)。

@@ -19,7 +19,8 @@ from pathlib import Path
 from .rcon import RconClient, RconError
 
 NOTICE_MINUTES = (15, 10, 5, 1)   # 予告カウントダウンのタイミング(残り分・降順)
-PLAYER_POLL_SEC = 30              # カウントダウン中の在席チェック間隔(秒)
+POLL_SEC = 15                     # カウントダウン中の在席/チャット確認間隔(秒)
+CANCEL_WORDS = ("no",)            # チャットでこの単語(単独)を送ると再起動を中止
 
 
 @dataclass
@@ -417,57 +418,106 @@ class ArkHost:
                 progress(f"DestroyWildDinos に失敗: {e}")
 
     # ---- 予告付き 再起動 / 停止 ----
-    def _notice_minutes(self, verb: str, reason: str, progress) -> None:
+    def _notice_minutes(self, verb: str, reason: str, cancelable: bool,
+                        progress) -> bool:
         """15→10→5→1分の順にチャット予告する(ARKはRCON中央表示不可のためチャット)。
 
-        カウントダウン中も在席を監視し、途中で誰もいなくなったら待たずに即実行する。
+        カウントダウン中も在席とチャットを監視し、誰もいなくなったら即実行、
+        cancelable時に誰かがチャットで 'no' を送ったら中止する。
+        戻り値: 中止されたら False、そのまま進めてよければ True。
         """
         tail = f" {reason}" if reason else ""
+        hint = " Type 'no' in chat to cancel." if cancelable else ""
+        if cancelable:
+            self._drain_chat()             # カウントダウン前の古い発言を無視する
         mins = NOTICE_MINUTES              # (15, 10, 5, 1)
         for idx, m in enumerate(mins):
             self.announce(f"[GSM] Server will {verb.upper()} in {m} minute(s){tail}. "
-                          "Please log off safely.")
+                          f"Please log off safely.{hint}")
             progress(f"予告(残り{m}分): {verb}")
             nxt = mins[idx + 1] if idx + 1 < len(mins) else 0
             gap = (m - nxt) * 60
-            if gap and self._wait_or_empty(gap, progress):
+            if not gap:
+                continue
+            res = self._wait_countdown(gap, cancelable, progress)
+            if res == "cancel":
+                self.announce(f"[GSM] {verb.capitalize()} cancelled by player.")
+                progress(f"プレイヤーがチャットで中止 → {verb}を取り消しました")
+                return False
+            if res == "empty":
                 progress(f"プレイヤー不在を検知 → 待たずに{verb}します")
-                return
+                return True
+        return True
 
-    def _wait_or_empty(self, seconds: int, progress=lambda t: None) -> bool:
-        """seconds秒待つ。POLL毎に在席確認し、0人になったら即Trueで戻る。"""
+    def _wait_countdown(self, seconds: int, cancelable: bool,
+                        progress=lambda t: None) -> str:
+        """seconds秒待つ。'cancel'=チャット中止 / 'empty'=無人 / ''=通常経過。"""
         waited = 0
         while waited < seconds:
-            step = min(PLAYER_POLL_SEC, seconds - waited)
+            step = min(POLL_SEC, seconds - waited)
             time.sleep(step)
             waited += step
+            if cancelable and self._chat_cancel_hit():
+                return "cancel"
             try:
                 if self.num_players() == 0:
-                    return True
+                    return "empty"
             except Exception:
                 pass
+        return ""
+
+    def _drain_chat(self) -> None:
+        """溜まっているチャットを読み捨てる(GetChatはドレイン式=読むと消える)。"""
+        try:
+            self.rcon_command("GetChat")
+        except Exception:
+            pass
+
+    def _chat_cancel_hit(self) -> bool:
+        """新規チャットに中止ワード(単独の no)があれば True。
+
+        GetChatは "PlayerName: message" 形式の新規発言を返す(SERVER発言は無視)。
+        """
+        try:
+            raw = self.rcon_command("GetChat")
+        except Exception:
+            return False
+        if not raw or "no response" in raw.lower():
+            return False
+        for line in raw.splitlines():
+            who, sep, msg = line.partition(":")
+            if not sep or who.strip().upper() == "SERVER":
+                continue
+            body = re.sub(r"[^a-z]", "", msg.strip().lower())  # 記号除去し英字のみ
+            if body in CANCEL_WORDS:
+                return True
         return False
 
     def restart_with_notice(self, notify: bool = True, respawn_dinos: bool = False,
-                            progress=lambda t: None) -> None:
+                            cancelable: bool = False,
+                            progress=lambda t: None) -> bool:
         """プレイヤーが居れば15/10/5/1分前にチャット予告してから再起動する。
-        respawn_dinos=True なら起動完了後に野生恐竜をリスポーンする。"""
+        respawn_dinos=True なら起動完了後に野生恐竜をリスポーンする。
+        cancelable=True でチャット 'no' により中止可能。戻り値: 中止されたら False。"""
         if notify and self.is_running() and self.num_players() > 0:
-            self._notice_minutes("restart", "", progress)
+            if not self._notice_minutes("restart", "", cancelable, progress):
+                return False               # プレイヤーが中止 → 再起動しない
             self.announce("[GSM] Restarting now. Back in ~2 minutes.")
         elif self.is_running():
             progress("プレイヤー不在のため予告を省略して再起動します")
         self.restart(progress=progress)
         if respawn_dinos:
             self.respawn_wild_dinos_after_ready(progress=progress)
+        return True
 
     def stop_with_notice(self, notify: bool = True, reason: str = "",
                          progress=lambda t: None) -> None:
         """プレイヤーが居れば15/10/5/1分前にチャット予告してから停止する。
 
-        reason を指定すると予告文に理由を添える(例: "for a server update")。"""
+        reason を指定すると予告文に理由を添える(例: "for a server update")。
+        停止(更新・手動)は中止不可(cancelable=False)。"""
         if notify and self.is_running() and self.num_players() > 0:
-            self._notice_minutes("shut down", reason, progress)
+            self._notice_minutes("shut down", reason, False, progress)
             tail = f" {reason}" if reason else ""
             self.announce(f"[GSM] Shutting down now{tail}. Thanks for playing!")
         elif self.is_running():
