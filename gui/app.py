@@ -18,7 +18,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from core import provision
-from core.arkhost import ArkHost
+from core.arkhost import ArkHost, format_uptime, uptimes_by_port
 from core.config import AppConfig, load_config
 from core.gameserver import GameServer
 from core.hyperv import HyperVManager
@@ -34,6 +34,9 @@ from core.transport import LocalPowerShell, SSHTransport
 REFRESH_INTERVAL_MS = 20_000
 PUBLISH_CHECK_MS = 600_000  # 外部公開ヘルスチェック間隔(10分)
 SCHED_TICK_MS = 20_000      # 再起動予約の発火チェック間隔
+# 予約の「バックアップ→更新→再起動」チェーンで、前段が長引いた時に後段を諦める上限。
+# 更新が数十分かかるのは正常だが、何時間も後に再起動が飛ぶのは事故なので打ち切る。
+SCHED_CHAIN_MAX_DELAY_S = 3600
 from core.paths import app_dir
 CONFIG_PATH = app_dir() / "config.yaml"
 SCHEDULES_PATH = CONFIG_PATH.parent / "schedules.json"  # 再起動予約の永続化
@@ -479,6 +482,8 @@ class App(tk.Tk):
         # 定期再起動の予約(schedules.jsonから復元=アプリ再起動でも維持)
         self.schedules = scheduler.load_jobs(SCHEDULES_PATH)
         self._sched_fired: set = set()   # (job_id, "HH:MM", "YYYY-MM-DD") 二重発火抑止
+        self._sched_interval_last: dict = {}  # job_id -> 最終発火時刻(間隔モード)
+        self._sched_interval_running: set = set()  # 実行中の間隔ジョブ(多重発火防止)
         # ARK dynamic config(無停止で倍率を変更)。状態を復元してサーバー起動。
         self.dynstate = dynconfig.load_state(DYNSTATE_PATH)
         self.dynserver = dynconfig.DynConfigServer(DYNFILE_PATH, self.dynstate.port)
@@ -1477,22 +1482,24 @@ class App(tk.Tk):
         top = ttk.LabelFrame(parent, text="🦖 ARK サーバー(ホスト・複数マップ対応)")
         top.pack(fill=tk.X, padx=8, pady=(8, 0))
         h = min(7, max(3, len(self.arkhosts)))
-        self.ark_tree = ttk.Treeview(top, columns=("status", "public", "players"),
+        self.ark_tree = ttk.Treeview(top, columns=("status", "public", "players", "uptime"),
                                      show="tree headings", height=h)
         self.ark_tree.heading("#0", text="サーバー")
         self.ark_tree.heading("status", text="状態")
         self.ark_tree.heading("public", text="外部公開")
         self.ark_tree.heading("players", text="人数")
-        self.ark_tree.column("#0", width=280)
+        self.ark_tree.heading("uptime", text="稼働時間")
+        self.ark_tree.column("#0", width=240)
         self.ark_tree.column("status", width=100, anchor=tk.CENTER)
         self.ark_tree.column("public", width=90, anchor=tk.CENTER)
-        self.ark_tree.column("players", width=70, anchor=tk.CENTER)
+        self.ark_tree.column("players", width=60, anchor=tk.CENTER)
+        self.ark_tree.column("uptime", width=110, anchor=tk.CENTER)
         self.ark_tree.pack(fill=tk.X, padx=6, pady=(6, 0))
         for i, ah in enumerate(self.arkhosts):
             port = ah.cfg.game_port
             label = ah.cfg.display_name + (f"  (:{port})" if port else "")
             self.ark_tree.insert("", tk.END, iid=str(i), text=label,
-                                 values=("確認中…", "…", "-"))
+                                 values=("確認中…", "…", "-", "…"))
         for tag, color in TAG_COLORS.items():
             self.ark_tree.tag_configure(tag, foreground=color)
 
@@ -1669,6 +1676,13 @@ class App(tk.Tk):
 
         def job():
             out = []
+            ups = {}
+            try:                       # 稼働時間は全マップぶんをPowerShell1回で取る
+                if self.arkhosts:
+                    ups = uptimes_by_port(self.arkhosts[0].runner,
+                                          self.arkhosts[0].cfg.process_name)
+            except Exception:
+                ups = {}
             for ah in self.arkhosts:
                 gamelog = ""
                 try:
@@ -1684,7 +1698,7 @@ class App(tk.Tk):
                             pass
                 except Exception as exc:
                     running, players = False, f"(err {exc})"
-                out.append((running, players, gamelog))
+                out.append((running, players, gamelog, ups.get(ah.cfg.game_port)))
             return out
 
         def on_done(results, error):
@@ -1695,12 +1709,14 @@ class App(tk.Tk):
                     self._set_status(f"ARK取得失敗: {error}")
                 return
             first_seen = False
-            for i, (running, players, gamelog) in enumerate(results):
+            for i, (running, players, gamelog, up) in enumerate(results):
                 pc = self._ark_player_count(players) if running else "-"
                 # public列は外部公開監視が更新するので触らない(set で個別更新)
                 self.ark_tree.set(str(i), "status",
                                   "🟢 稼働中" if running else "⚪ 停止中")
                 self.ark_tree.set(str(i), "players", pc)
+                self.ark_tree.set(str(i), "uptime",
+                                  format_uptime(up) if running else "―")
                 self.ark_tree.item(str(i), tags=("active" if running else "off",))
                 prev = self._ark_running.get(i)           # None=初回(未取得)
                 self._ark_running[i] = running
@@ -1793,6 +1809,7 @@ class App(tk.Tk):
             if not ah.is_running():
                 return "not_running"
             ah.destroy_wild_dinos()
+            ah.announce("[GSM] Wild dinos have respawned.")
             return "ok"
 
         def on_done(res, error):
@@ -2004,7 +2021,8 @@ class App(tk.Tk):
                         ah = self.arkhosts[k]
                         self._mark_stop(f"ark:{k}")
                         self._progress_from_worker(f"{ah.cfg.display_name} を停止中…")
-                        ah.stop(progress=self._progress_from_worker)
+                        ah.stop_with_notice(reason="for a server update",
+                                            progress=self._progress_from_worker)
                     self._progress_from_worker(f"更新中: {root}")
                     arkupdate.update(sc, root, progress=self._progress_from_worker)
                     if do_restart:
@@ -2673,7 +2691,8 @@ class App(tk.Tk):
     def _build_sched_tab(self, parent: ttk.Frame) -> None:
         ttk.Label(
             parent, foreground=PAL["muted"],
-            text="↳ 指定した時刻(毎日)に自動で再起動します。プレイヤーが居れば60/30/10秒前にチャット予告。"
+            text="↳ 指定した時刻(毎日)に自動で再起動/バックアップします。プレイヤーが居れば60/30/10秒前にチャット予告。"
+                 "「⏱ 定期バックアップ」を設定すると N分毎に稼働中サーバーだけを自動バックアップ(再起動なし)。"
                  "設定は保存され、アプリを再起動しても復元されます。"
         ).pack(anchor=tk.W, padx=10, pady=(8, 2))
 
@@ -2717,6 +2736,8 @@ class App(tk.Tk):
         if self.arkhosts:
             out.append(("🦖 ARK 全マップ(停止中は自動スキップ)", "ark-all", "*",
                         "ARK 全マップ"))
+            out.append(("🧬 ARK プレイヤーデータのみ(全マップ+クラスタ・軽量)",
+                        "ark-players", "*", "ARK プレイヤーデータ"))
         for ah in self.arkhosts:
             out.append((f"🦖 {ah.cfg.display_name}", "ark", ah.cfg.map_label,
                         ah.cfg.display_name))
@@ -2733,10 +2754,18 @@ class App(tk.Tk):
         self.sched_tree.delete(*self.sched_tree.get_children())
         for job in self.schedules:
             kind = ("🦖ARK全" if job.kind == "ark-all"
+                    else "🧬 プレイヤー" if job.kind == "ark-players"
                     else "🦖ARK" if job.kind == "ark" else "🟩MC")
-            act = " → ".join(
-                ([("💾バックアップ")] if job.do_backup else [])
-                + (["🔁再起動"] if job.do_restart else [])) or "(なし)"
+            if job.is_interval():
+                act = ("⏱🧬 プレイヤーデータBK" if job.kind == "ark-players"
+                       else "⏱💾 定期バックアップ")
+                if job.keep:
+                    act += f"({job.keep}世代)"
+            else:
+                act = " → ".join(
+                    ([("💾バックアップ")] if job.do_backup else [])
+                    + (["⬆更新"] if job.do_update else [])
+                    + (["🔁再起動"] if job.do_restart else [])) or "(なし)"
             name = job.display
             self.sched_tree.insert(
                 "", tk.END, iid=job.id, text=name,
@@ -2785,7 +2814,7 @@ class App(tk.Tk):
         dialog.title("再起動予約の編集" if job else "再起動予約の追加")
         dialog.transient(self)
         dialog.grab_set()
-        dialog.geometry("520x600+%d+%d"
+        dialog.geometry("520x700+%d+%d"
                         % (self.winfo_rootx() + 200, self.winfo_rooty() + 60))
         form = ttk.Frame(dialog, padding=12)
         form.pack(fill=tk.BOTH, expand=True)
@@ -2829,11 +2858,16 @@ class App(tk.Tk):
         act_frame = ttk.Frame(form)
         act_frame.grid(row=5, column=1, sticky=tk.W, pady=(8, 2))
         backup_var = tk.BooleanVar(value=job.do_backup if job else False)
+        update_var = tk.BooleanVar(value=job.do_update if job else False)
         restart_var = tk.BooleanVar(value=job.do_restart if job else True)
         ttk.Checkbutton(act_frame, text="💾 バックアップ", variable=backup_var).pack(anchor=tk.W)
+        ttk.Checkbutton(act_frame, text="⬆ アップデート(更新があれば適用・ARKのみ)",
+                        variable=update_var).pack(anchor=tk.W)
         ttk.Checkbutton(act_frame, text="🔁 再起動", variable=restart_var).pack(anchor=tk.W)
         ttk.Label(act_frame, foreground=PAL["muted"],
-                  text="両方ONで「バックアップ → 再起動」をまとめて実行").pack(anchor=tk.W)
+                  text="「バックアップ → 更新 → 再起動」の順にまとめて実行。\n"
+                       "更新は「更新がある時だけ」停止→更新→元が稼働中なら起動(無ければ何もしない)"
+                  ).pack(anchor=tk.W)
 
         # --- ローリング再起動(ARK全マップ用) ---
         rolling_var = tk.BooleanVar(value=job.rolling if job else False)
@@ -2881,42 +2915,94 @@ class App(tk.Tk):
         ttk.Checkbutton(form, text="有効", variable=enabled_var).grid(
             row=10, column=0, columnspan=2, sticky=tk.W, pady=6)
 
+        # --- ⏱ 定期バックアップ(間隔モード) ---
+        ttk.Separator(form, orient=tk.HORIZONTAL).grid(
+            row=11, column=0, columnspan=2, sticky=tk.EW, pady=(6, 4))
+        interval_choices = [("使わない(上の時刻指定モード)", 0)] + [
+            (f"{m}分毎", m) for m in (10, 20, 30, 40, 50, 60, 90, 120)]
+        ttk.Label(form, text="⏱ 定期バックアップ:").grid(
+            row=12, column=0, sticky=tk.W, pady=4)
+        interval_var = tk.StringVar()
+        interval_combo = ttk.Combobox(
+            form, textvariable=interval_var, state="readonly", width=24,
+            values=[c[0] for c in interval_choices])
+        interval_combo.grid(row=12, column=1, sticky=tk.W, pady=4)
+        cur_iv = (job.interval_min if job else 0)
+        interval_combo.current(next(
+            (i for i, c in enumerate(interval_choices) if c[1] == cur_iv), 0))
+        ttk.Label(form, foreground=PAL["muted"],
+                  text="設定すると N分毎に「稼働中サーバーだけ」を自動バックアップ(saveworld後)。"
+                       "\n停止中は自動スキップ。この時は上の時刻/曜日/動作は無視されます。"
+                       "\n🧬 プレイヤーデータのみ を選ぶと saveworld せず軽量(約1MB)＝無停止・停止中マップも取得。").grid(
+            row=13, column=0, columnspan=2, sticky=tk.W)
+
+        ttk.Label(form, text="保持世代数:").grid(row=14, column=0, sticky=tk.W, pady=4)
+        keep_var = tk.StringVar(value=str(job.keep) if (job and job.keep) else "")
+        ttk.Entry(form, textvariable=keep_var, width=10).grid(
+            row=14, column=1, sticky=tk.W, pady=4)
+        ttk.Label(form, foreground=PAL["muted"],
+                  text=f"空欄=既定({self.backupcfg.keep}世代)。多めに残したい定期BK用"
+                       "(例: 60 → 10分毎なら10時間ぶん)").grid(
+            row=15, column=0, columnspan=2, sticky=tk.W)
+
         def ok() -> None:
-            raw = [scheduler.normalize_time(t) for t in times_var.get().split(",") if t.strip()]
-            times = [t for t in raw if t]
-            if not times:
-                messagebox.showerror("入力エラー",
-                                     "時刻を HH:MM 形式で1つ以上入力してください(例 04:00)",
+            interval_min = interval_choices[
+                [c[0] for c in interval_choices].index(interval_var.get())][1]
+            raw_keep = keep_var.get().strip()
+            if raw_keep and not raw_keep.isdigit():
+                messagebox.showerror("入力エラー", "保持世代数は数字で入力してください(空欄=既定)",
                                      parent=dialog)
                 return
-            days = [i for i, dv in enumerate(day_vars) if dv.get()]  # 空=毎日
-            do_backup, do_restart = backup_var.get(), restart_var.get()
-            if not (do_backup or do_restart):
-                messagebox.showerror(
-                    "入力エラー", "「バックアップ」「再起動」の少なくとも一方を選んでください",
-                    parent=dialog)
-                return
+            keep = int(raw_keep) if raw_keep else 0
             rolling = rolling_var.get()
             order = [lbl for _d, lbl in order_state]
             tgt = targets[labels.index(tgt_var.get())]
+            if interval_min > 0:
+                # 間隔モード: 時刻/曜日/動作は使わず、稼働中バックアップに固定
+                times, days = [], []
+                do_backup, do_restart, do_update = True, False, False
+            else:
+                raw = [scheduler.normalize_time(t)
+                       for t in times_var.get().split(",") if t.strip()]
+                times = [t for t in raw if t]
+                if not times:
+                    messagebox.showerror(
+                        "入力エラー",
+                        "時刻を HH:MM 形式で1つ以上入力してください(例 04:00)\n"
+                        "または下の「⏱ 定期バックアップ」で間隔を選んでください",
+                        parent=dialog)
+                    return
+                days = [i for i, dv in enumerate(day_vars) if dv.get()]  # 空=毎日
+                do_backup, do_restart = backup_var.get(), restart_var.get()
+                do_update = update_var.get()
+                if not (do_backup or do_restart or do_update):
+                    messagebox.showerror(
+                        "入力エラー",
+                        "「バックアップ」「更新」「再起動」の少なくとも1つを選んでください",
+                        parent=dialog)
+                    return
             if job is None:
                 new = scheduler.RestartJob(
                     id=uuid.uuid4().hex[:8], kind=tgt[1], target=tgt[2],
                     display=tgt[3], times=times, days=days, enabled=enabled_var.get(),
-                    do_backup=do_backup, do_restart=do_restart,
-                    rolling=rolling, order=order)
+                    do_backup=do_backup, do_restart=do_restart, do_update=do_update,
+                    rolling=rolling, order=order, interval_min=interval_min,
+                    keep=keep)
                 self.schedules.append(new)
             else:
                 job.kind, job.target, job.display = tgt[1], tgt[2], tgt[3]
                 job.times, job.days, job.enabled = times, days, enabled_var.get()
                 job.do_backup, job.do_restart = do_backup, do_restart
+                job.do_update = do_update
                 job.rolling, job.order = rolling, order
+                job.interval_min, job.keep = interval_min, keep
+                self._sched_interval_last.pop(job.id, None)   # 間隔を再アンカー
             self._sched_save()
             self._sched_refresh_tree()
             dialog.destroy()
 
         bar = ttk.Frame(form)
-        bar.grid(row=11, column=0, columnspan=2, pady=(10, 0))
+        bar.grid(row=16, column=0, columnspan=2, pady=(10, 0))
         ttk.Button(bar, text="保存", command=ok).pack(side=tk.LEFT, padx=6)
         ttk.Button(bar, text="キャンセル", command=dialog.destroy).pack(side=tk.LEFT)
 
@@ -2967,20 +3053,123 @@ class App(tk.Tk):
             self._sched_fire(job)
         today = now.strftime("%Y-%m-%d")   # 当日分だけ保持(メモリ肥大防止)
         self._sched_fired = {k for k in self._sched_fired if k[2] == today}
+        self._sched_interval_tick(now)     # 間隔モード(定期バックアップ)の発火判定
+        # 生きているジョブの記録だけ残す(削除済みジョブのゴミ掃除)
+        alive = {j.id for j in self.schedules}
+        self._sched_interval_last = {
+            k: v for k, v in self._sched_interval_last.items() if k in alive}
         self.after(SCHED_TICK_MS, self._sched_tick)
+
+    def _sched_interval_tick(self, now) -> None:
+        """間隔モードの予約を N分毎に発火。有効化直後は1周期あけてから初回発火。"""
+        for job in self.schedules:
+            if not job.enabled or not job.is_interval():
+                continue
+            last = self._sched_interval_last.get(job.id)
+            if last is None:                 # 初回はアンカーだけ置く(即発火しない)
+                self._sched_interval_last[job.id] = now
+                continue
+            if (now - last).total_seconds() >= job.interval_min * 60:
+                self._sched_interval_last[job.id] = now
+                self._sched_fire_interval_backup(job)
 
     def _sched_fire(self, job) -> None:
         """予約の発火。do_backup/do_restart に応じて バックアップ → 再起動 を実行。"""
-        if job.kind == "ark-all":
+        # 間隔モード=稼働中サーバーの定期バックアップ。プレイヤーデータのみは
+        # 時刻指定モードでも同じ経路(世界セーブを含まない軽量BK)で処理する。
+        if job.is_interval() or job.kind == "ark-players":
+            self._sched_fire_interval_backup(job)
+            return
+        if job.kind == "ark-all" and not job.do_update:
             self._sched_fire_ark_all(job)
             return
-        if job.do_backup and job.do_restart:
-            # バックアップ完了後に再起動(1ジョブでまとめて)
-            self._sched_fire_backup(job, then=lambda: self._sched_do_restart(job))
-        elif job.do_backup:
-            self._sched_fire_backup(job)
-        elif job.do_restart:
-            self._sched_do_restart(job)
+        # バックアップ → 更新 → 再起動 の順に、必要なものだけ数珠つなぎで実行する
+        steps = []
+        if job.do_backup:
+            steps.append(self._sched_fire_backup
+                         if job.kind != "ark-all" else self._sched_backup_ark_all)
+        if job.do_update:
+            steps.append(self._sched_do_update)
+        if job.do_restart:
+            steps.append(self._sched_do_restart
+                         if job.kind != "ark-all" else self._sched_restart_ark_all)
+        self._sched_run_chain(job, steps)
+
+    def _sched_run_chain(self, job, steps) -> None:
+        """steps(job, then=…) を順に実行する。各stepは完了時に then() で次を呼ぶ。
+
+        前段(更新など)が長引くと、後段の再起動が予約時刻から何時間も離れて発火し、
+        「朝5時のつもりの再起動が昼に飛ぶ」事故になる(実際に発生)。
+        そのため予約時刻から SCHED_CHAIN_MAX_DELAY_S を過ぎたら後続を打ち切る。
+        """
+        started = datetime.now()
+
+        def run(i):
+            if i >= len(steps):
+                return
+            late = (datetime.now() - started).total_seconds()
+            if i > 0 and late > SCHED_CHAIN_MAX_DELAY_S:
+                msg = (f"⏰ {job.display}: 前段に{late / 60:.0f}分かかったため、"
+                       f"以降の処理(再起動など)を中止しました"
+                       f"(予約時刻から{SCHED_CHAIN_MAX_DELAY_S // 60}分以上ズレるため)")
+                self._append_log(msg)
+                self._set_status(msg)
+                self._notify("restart", "⏰ " + msg)
+                return
+            steps[i](job, then=lambda: run(i + 1))
+        if steps:
+            run(0)
+
+    def _sched_backup_ark_all(self, job, then=None) -> None:
+        """ARK全マップのバックアップ(更新と繋ぐ用)。"""
+        def job_fn():
+            for ah in self.arkhosts:
+                self._progress_from_worker(f"{ah.cfg.display_name}: バックアップ中…")
+                try:
+                    backup.ark_backup(
+                        str(backup.ark_saved_dir(ah.cfg.config_dir)), self.backupcfg,
+                        ah.cfg.map_label, ah.cfg.save_subdir,
+                        progress=self._progress_from_worker)
+                except backup.BackupError as exc:   # 未起動マップはセーブ無し=スキップ
+                    self._progress_from_worker(
+                        f"{ah.cfg.display_name}: セーブ無しのためスキップ({exc})")
+            return "done"
+
+        def on_done(_r, error):
+            if error is not None:
+                self._set_status(f"予約バックアップ失敗: {error}")
+            if then:
+                then()
+        self._task_submit("⏰ 予約バックアップ: ARK全マップ", job_fn, on_done,
+                          category="予約バックアップ", busy=False)
+
+    def _sched_restart_ark_all(self, job, then=None) -> None:
+        """ARK全マップの再起動(更新と繋ぐ用)。停止中はスキップ。"""
+        respawn = self.ark_respawn_on_restart
+        order = job.order or [a.cfg.map_label for a in self.arkhosts]
+        seq = [a for lbl in order for a in self.arkhosts if a.cfg.map_label == lbl]
+        seq += [a for a in self.arkhosts if a not in seq]
+
+        def job_fn():
+            for ah in seq:
+                if not ah.is_running():
+                    self._progress_from_worker(f"{ah.cfg.display_name}: 停止中のためスキップ")
+                    continue
+                self._mark_restart(f"ark:{self.arkhosts.index(ah)}")
+                self._progress_from_worker(f"{ah.cfg.display_name}: 再起動中…")
+                ah.restart_with_notice(respawn_dinos=respawn,
+                                       progress=self._progress_from_worker)
+                ah.wait_ready(progress=self._progress_from_worker)
+            return "done"
+
+        def on_done(_r, error):
+            if error is not None:
+                self._set_status(f"予約再起動失敗: {error}")
+            self._ark_refresh(silent=True)
+            if then:
+                then()
+        self._task_submit("⏰ 予約再起動: ARK全マップ", job_fn, on_done,
+                          category="予約再起動", busy=False)
 
     def _sched_fire_ark_all(self, job) -> None:
         """ARK全マップの予約。マップごとに(バックアップ/再起動)を順に実行する。
@@ -2998,10 +3187,16 @@ class App(tk.Tk):
                 for ah in seq:
                     if job.do_backup:
                         self._progress_from_worker(f"{ah.cfg.display_name}: バックアップ中…")
-                        backup.ark_backup(
-                            str(backup.ark_saved_dir(ah.cfg.config_dir)), self.backupcfg,
-                            ah.cfg.map_label, ah.cfg.save_subdir,
-                            progress=self._progress_from_worker)
+                        try:
+                            backup.ark_backup(
+                                str(backup.ark_saved_dir(ah.cfg.config_dir)),
+                                self.backupcfg, ah.cfg.map_label, ah.cfg.save_subdir,
+                                progress=self._progress_from_worker)
+                        except backup.BackupError as exc:
+                            # 一度も起動していないマップはセーブが無い。ここで止めると
+                            # 後続マップ(稼働中の本番)まで巻き添えでバックアップされない。
+                            self._progress_from_worker(
+                                f"{ah.cfg.display_name}: セーブ無しのためスキップ({exc})")
                     if job.do_restart:
                         if not ah.is_running():
                             self._progress_from_worker(
@@ -3026,9 +3221,13 @@ class App(tk.Tk):
                 if job.do_backup:
                     saved_root = str(backup.ark_saved_dir(ah.cfg.config_dir))
                     self._progress_from_worker(f"{ah.cfg.display_name}: バックアップ中…")
-                    backup.ark_backup(saved_root, self.backupcfg, ah.cfg.map_label,
-                                      ah.cfg.save_subdir,
-                                      progress=self._progress_from_worker)
+                    try:
+                        backup.ark_backup(saved_root, self.backupcfg, ah.cfg.map_label,
+                                          ah.cfg.save_subdir,
+                                          progress=self._progress_from_worker)
+                    except backup.BackupError as exc:
+                        self._progress_from_worker(
+                            f"{ah.cfg.display_name}: セーブ無しのためスキップ({exc})")
                 if job.do_restart:
                     if not ah.is_running():
                         self._progress_from_worker(
@@ -3042,12 +3241,21 @@ class App(tk.Tk):
                 self._ark_action_done(f"⏰ {ah.cfg.display_name}: 完了", 3000),
                 category="予約(全マップ)", busy=False)
 
-    def _sched_do_restart(self, job) -> None:
+    def _sched_do_restart(self, job, then=None) -> None:
         """予約再起動の実行(ARK/MC)。停止中はスキップ。タスク画面に記録。"""
+        def _chain(base):
+            """既存のon_doneを包んで、完了後に次のstep(then)へ繋ぐ。"""
+            def _f(result, error):
+                base(result, error)
+                if then:
+                    then()
+            return _f
         if job.kind == "ark":
             ah = next((a for a in self.arkhosts if a.cfg.map_label == job.target), None)
             if ah is None:
                 self._append_log(f"⏰ 予約再起動: ARK '{job.target}' が見つからずスキップ")
+                if then:
+                    then()
                 return
             respawn = self.ark_respawn_on_restart   # ⚙詳細設定のトグルで決まる
             self._mark_restart(f"ark:{self.arkhosts.index(ah)}")
@@ -3062,12 +3270,15 @@ class App(tk.Tk):
             title = f"⏰ 予約再起動: {ah.cfg.display_name}" + ("+恐竜リスポーン" if respawn else "")
             self._task_submit(
                 title, job_fn,
-                self._ark_action_done(f"⏰ {ah.cfg.display_name} を予約再起動しました", 4000),
+                _chain(self._ark_action_done(
+                    f"⏰ {ah.cfg.display_name} を予約再起動しました", 4000)),
                 category="予約再起動", busy=False)
         else:
             server = self.servers.get(job.target)
             if server is None:
                 self._append_log(f"⏰ 予約再起動: MC '{job.target}' が見つからずスキップ")
+                if then:
+                    then()
                 return
             self._mark_restart(f"mc:{job.target}")
 
@@ -3075,7 +3286,8 @@ class App(tk.Tk):
                 return self._mc_restart_with_notice(server, self._progress_from_worker)
             self._task_submit(
                 f"⏰ 予約再起動: {server.profile.display_name}", job_fn,
-                self._make_action_done(f"⏰ {server.profile.display_name} を予約再起動しました"),
+                _chain(self._make_action_done(
+                    f"⏰ {server.profile.display_name} を予約再起動しました")),
                 category="予約再起動", busy=False)
 
     def _sched_fire_backup(self, job, then=None) -> None:
@@ -3122,6 +3334,220 @@ class App(tk.Tk):
                 then()
         self._task_submit(f"⏰ 予約バックアップ: {disp}", job_fn, on_done,
                           category="予約バックアップ", busy=False)
+
+    def _ark_cluster_dir(self) -> str | None:
+        """起動引数の -ClusterDirOverride="..." からクラスタ共有フォルダを取り出す。
+        クラスタ転送中のキャラ/恐竜/アイテムはここにあるのでバックアップ対象に含める。"""
+        import re
+        for a in self.arkhosts:
+            m = re.search(r'-ClusterDirOverride="?([^"\s]+)"?', a.cfg.launch_args)
+            if m:
+                return m.group(1)
+        return None
+
+    def _ark_update_one(self, ah, latest: str | None, progress) -> str:
+        """1マップを必要なら更新する(予約更新用)。更新があった時だけ 停止→更新→復帰。
+
+        更新不要なら何もしない(=無駄に落とさない)。稼働していたマップは更新後に起動し直す。
+        戻り値は結果の短い説明。呼び出し側(ワーカー)から使う。"""
+        name = ah.cfg.display_name
+        root = ah.cfg.install_root
+        cur = arkupdate.installed_buildid(root)
+        if latest and cur == latest:
+            progress(f"{name}: 最新({cur})のため更新スキップ")
+            return "最新"
+        progress(f"{name}: 更新あり {cur} → {latest}")
+        was_running = ah.is_running()
+        if was_running:
+            self._mark_restart(f"ark:{self.arkhosts.index(ah)}")
+            progress(f"{name}: 更新のため停止(saveworld)…")
+            ah.stop_with_notice(progress=progress)
+            time.sleep(3)
+        err = None
+        try:
+            new = arkupdate.update(self.ark_steamcmd, root, progress=progress)
+            progress(f"{name}: 更新完了 {cur} → {new}")
+            result = f"更新 {cur}→{new}"
+        except Exception as exc:
+            progress(f"{name}: ❌更新失敗 {exc}")
+            result = f"更新失敗({exc})"
+            err = exc
+        if was_running:                      # 元が稼働中なら必ず戻す(失敗時も)
+            progress(f"{name}: 起動…")
+            ah.start(progress=progress)
+            ah.wait_ready(timeout=420, progress=progress)
+        if err is not None:
+            # 失敗を握り潰すとタスク画面が「成功」になって嘘をつくので、必ず投げる。
+            # (サーバーの復帰は上で済ませてから)
+            raise RuntimeError(f"{name}: {err}") from err
+        return result
+
+    def _sched_do_update(self, job, then=None) -> None:
+        """予約更新: 対象マップに更新があれば 停止→更新→復帰。無ければ何もしない。"""
+        if not self.arkupdate_enabled:
+            self._append_log("⏰ 予約更新: steamcmdが無いためスキップ")
+            if then:
+                then()
+            return
+        if job.kind == "ark":
+            targets = [a for a in self.arkhosts if a.cfg.map_label == job.target]
+        elif job.kind == "ark-all":
+            targets = list(self.arkhosts)
+        else:
+            self._append_log("⏰ 予約更新: ARK以外は未対応のためスキップ")
+            if then:
+                then()
+            return
+
+        def job_fn():
+            latest = arkupdate.latest_buildid(self.ark_steamcmd)
+            self._progress_from_worker(f"最新ビルド: {latest}")
+            out, errs = [], []
+            for ah in targets:
+                name = ah.cfg.display_name
+                try:                     # 1マップ失敗しても残りは続ける
+                    out.append(f"{name}: "
+                               + self._ark_update_one(ah, latest,
+                                                      self._progress_from_worker))
+                except Exception as exc:
+                    errs.append(f"{name}({exc})")
+                    out.append(f"{name}: 失敗")
+            if errs:                     # 1つでも失敗ならタスクは「失敗」にする
+                raise RuntimeError(f"{len(errs)}/{len(targets)}件が更新失敗: "
+                                   + " / ".join(errs[:3])
+                                   + (" …" if len(errs) > 3 else ""))
+            return " / ".join(out)
+
+        def on_done(result, error):
+            if error is not None:
+                self._set_status(f"予約更新に失敗: {error}")
+                self._notify("update", f"❌ ARK予約更新に失敗: {error}")
+            else:
+                self._set_status(f"⏰ 予約更新: {result}")
+            self._ark_refresh(silent=True)
+            if then:
+                then()
+        self._task_submit(f"⏰ 予約更新: {job.display}", job_fn, on_done,
+                          category="予約更新", busy=False)
+
+    def _sched_fire_interval_backup(self, job) -> None:
+        """間隔モードの定期バックアップ。稼働中サーバーのみ、saveworld/save-all で
+        最新状態を保存してからバックアップし、停止中はスキップする。"""
+        import time as _t
+        if job.id in self._sched_interval_running:   # 前回がまだ走っていれば見送る
+            self._append_log(
+                f"⏱ 定期バックアップ({job.display}): 前回実行中のため今回はスキップ")
+            return
+        self._sched_interval_running.add(job.id)
+
+        def backup_ark(ah):
+            if not ah.is_running():
+                self._progress_from_worker(f"{ah.cfg.display_name}: 停止中のためスキップ")
+                return None
+            try:
+                self._progress_from_worker(f"{ah.cfg.display_name}: 保存(saveworld)…")
+                ah.rcon_command("saveworld")
+                _t.sleep(4)                  # セーブ書き出しを待つ
+            except Exception as exc:
+                self._progress_from_worker(
+                    f"{ah.cfg.display_name}: 保存コマンド失敗({exc}) 既存セーブで続行")
+            self._progress_from_worker(f"{ah.cfg.display_name}: バックアップ中…")
+            return backup.ark_backup(
+                str(backup.ark_saved_dir(ah.cfg.config_dir)), self.backupcfg,
+                ah.cfg.map_label, ah.cfg.save_subdir,
+                progress=self._progress_from_worker)
+
+        def backup_mc(server):
+            p = server.profile
+            try:
+                if server.status() != "active":
+                    self._progress_from_worker(f"{p.display_name}: 停止中のためスキップ")
+                    return None
+            except Exception:
+                self._progress_from_worker(f"{p.display_name}: 状態不明のためスキップ")
+                return None
+            try:
+                if p.game == "palworld":
+                    self._progress_from_worker(f"{p.display_name}: 保存(Save)…")
+                    server.rcon_command("Save")
+                else:
+                    self._progress_from_worker(f"{p.display_name}: 保存(save-all flush)…")
+                    server.rcon_command("save-all flush")
+                _t.sleep(3)
+            except Exception as exc:
+                self._progress_from_worker(
+                    f"{p.display_name}: 保存コマンド失敗({exc}) 既存セーブで続行")
+            self._progress_from_worker(f"{p.display_name}: バックアップ中…")
+            if p.game == "palworld":
+                return backup.pal_backup(p, self.backupcfg,
+                                         progress=self._progress_from_worker)
+            return backup.mc_backup(p, self.backupcfg,
+                                    progress=self._progress_from_worker)
+
+        # プレイヤーデータのみ(全マップ+クラスタ)= 世界セーブを含めない軽量バックアップ。
+        # saveworldしないので稼働中マップに影響せず、停止中マップのぶんも一緒に取れる。
+        if job.kind == "ark-players":
+            entries = [(a.cfg.map_label, str(backup.ark_saved_dir(a.cfg.config_dir)),
+                        a.cfg.save_subdir) for a in self.arkhosts]
+            cluster = self._ark_cluster_dir()
+            keep = job.keep or None
+
+            def job_fn_players():
+                self._progress_from_worker(
+                    f"プレイヤーデータを収集中…({len(entries)}マップ"
+                    + (" + クラスタ" if cluster else "") + ")")
+                path = backup.ark_player_backup(
+                    entries, cluster, self.backupcfg, keep=keep,
+                    progress=self._progress_from_worker)
+                return Path(path).name
+
+            def on_done_players(result, error):
+                self._sched_interval_running.discard(job.id)
+                if error is not None:
+                    self._set_status(f"プレイヤーデータBK失敗: {error}")
+                    self._notify("backup", f"❌ プレイヤーデータのバックアップに失敗: {error}")
+                else:
+                    self._set_status(f"🧬 プレイヤーデータをバックアップ: {result}")
+            self._task_submit(
+                f"🧬 プレイヤーデータBK({job.interval_min}分毎)", job_fn_players,
+                on_done_players, category="定期バックアップ", busy=False)
+            return
+
+        # 対象の決定(ark-all=全ARK / ark=単一マップ / mc=単一MC・Palworld)
+        if job.kind == "ark-all":
+            targets_ark, targets_mc = list(self.arkhosts), []
+        elif job.kind == "ark":
+            ah = next((a for a in self.arkhosts if a.cfg.map_label == job.target), None)
+            targets_ark, targets_mc = ([ah] if ah else []), []
+        else:
+            server = self.servers.get(job.target)
+            targets_ark, targets_mc = [], ([server] if server else [])
+
+        def job_fn():
+            done = skipped = 0
+            for ah in targets_ark:
+                if backup_ark(ah):
+                    done += 1
+                else:
+                    skipped += 1
+            for server in targets_mc:
+                if backup_mc(server):
+                    done += 1
+                else:
+                    skipped += 1
+            return f"{done}件バックアップ / {skipped}件スキップ(停止中等)"
+
+        def on_done(result, error):
+            self._sched_interval_running.discard(job.id)
+            if error is not None:                # 失敗時だけ通知(定期=毎回通知は煩い)
+                self._set_status(f"定期バックアップ失敗: {job.display} ({error})")
+                self._notify("backup",
+                             f"❌ {job.display} の定期バックアップに失敗: {error}")
+            else:
+                self._set_status(f"⏱ 定期バックアップ({job.display}): {result}")
+        self._task_submit(
+            f"⏱ 定期バックアップ({job.interval_min}分毎): {job.display}",
+            job_fn, on_done, category="定期バックアップ", busy=False)
 
     def _pal_player_count(self, server) -> int:
         try:

@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 
 from .rcon import RconClient, RconError
 from .transport import SSHTransport
+
+RCON_FAIL = "RCON接続不可"        # players() が失敗を示す接頭辞(player_count が判定に使う)
 
 
 @dataclass
@@ -103,6 +106,64 @@ class GameServer:
     def restart(self) -> None:
         self._run_action("restart")
 
+    # ---- ゲーム内メッセージ / 予告付き再起動・停止 ----
+    def announce(self, msg: str) -> None:
+        """ゲーム内へブロードキャスト。MC=say / Palworld=Broadcast(空白は_に置換)。
+
+        失敗しても本処理は止めない(告知はベストエフォート)。
+        """
+        if self.profile.rcon is None:
+            return
+        if self.profile.game == "palworld":
+            # PalworldのBroadcastは空白で文が切れる仕様 → アンダースコアに置換
+            cmd = "Broadcast " + msg.replace(" ", "_")
+        else:
+            cmd = "say " + msg
+        try:
+            self.rcon_command(cmd)
+        except Exception:
+            pass
+
+    def _save_world(self) -> None:
+        """再起動前にワールドを保存(取りこぼし防止)。"""
+        if self.profile.rcon is None:
+            return
+        cmd = "Save" if self.profile.game == "palworld" else "save-all"
+        try:
+            self.rcon_command(cmd)
+        except Exception:
+            pass
+
+    def _notice_countdown(self, verb: str, progress, seconds=(60, 30, 10)) -> None:
+        """プレイヤーが居れば seconds の各タイミングで予告する(降順)。"""
+        try:
+            n = self.player_count()
+        except Exception:
+            n = None
+        if not n or n <= 0:
+            return
+        items = sorted(seconds, reverse=True)
+        for i, sec in enumerate(items):
+            progress(f"予告(残り{sec}秒): {verb}")
+            self.announce(f"Server {verb} in {sec} seconds")
+            nxt = items[i + 1] if i + 1 < len(items) else 0
+            wait = sec - nxt
+            if wait > 0:
+                time.sleep(wait)
+
+    def restart_with_notice(self, progress=lambda t: None) -> None:
+        """プレイヤーが居れば60/30/10秒前に予告してから再起動する。"""
+        self._notice_countdown("restart", progress)
+        self._save_world()
+        progress("再起動中…")
+        self.restart()
+
+    def stop_with_notice(self, progress=lambda t: None) -> None:
+        self._notice_countdown("shutdown", progress)
+        self._save_world()
+        progress("停止中…")
+        self.stop()
+
     def _run_action(self, action: str) -> None:
         result = self._ssh.run(self.profile.command_for(action), timeout=120)
         if not result.ok:
@@ -130,7 +191,25 @@ class GameServer:
                 return rcon.command(self.profile.players_command,
                                     strict=self._rcon_strict).strip() or "(応答なし)"
         except (RconError, OSError) as exc:
-            return f"RCON接続不可 ({exc})"
+            return f"{RCON_FAIL} ({exc})"
+
+    def player_count(self, raw: str | None = None) -> int | None:
+        """プレイヤー数を返す。取れなければ None(=不明。0人と区別する)。
+
+        Minecraft等は players_pattern("There are N of a max of M ...")で解釈。
+        Palworld の ShowPlayers はCSVで1行目がヘッダなので 行数-1 が人数。
+        """
+        if raw is None:
+            raw = self.players()
+        if raw.startswith(RCON_FAIL) or raw in ("RCON未設定", "(応答なし)"):
+            return None
+        parsed = self.parse_players(raw)
+        if parsed:
+            return parsed[0]
+        if self.profile.game == "palworld":
+            lines = [l for l in raw.splitlines() if l.strip()]
+            return max(0, len(lines) - 1)
+        return None
 
     def detect_version(self, lines: int = 2000) -> str | None:
         """起動ログからゲームのバージョンを抽出する(version_pattern未設定ならNone)。"""

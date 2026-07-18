@@ -115,6 +115,49 @@ def ark_backup(saved_root: str | Path, cfg: BackupConfig,
     return str(dest)
 
 
+PLAYER_PATTERNS = ("*.arkprofile", "*.arktribe")
+
+
+def ark_player_backup(entries, cluster_dir: str | Path | None, cfg: BackupConfig,
+                      keep: int | None = None, progress=lambda t: None) -> str:
+    """全マップのプレイヤーデータ(.arkprofile/.arktribe)＋クラスタ転送データだけを1zipにする。
+
+    世界セーブ(.ark)を含めないので合計1MB弱＝非常に軽く、saveworldもしないので
+    稼働中マップに影響しない(ディスク上の最後のセーブ時点のプレイヤーデータを写す)。
+    entries: [(map_label, saved_root, save_subdir), ...]
+    zip内は <map_label>/<Savedからの相対パス> なので、どのマップの誰かが分かる。
+    保存先: <path>/ARK/_players/players_<ts>.zip
+    """
+    d = _target_dir(cfg, "ARK/_players")
+    dest = d / f"players_{_ts()}.zip"
+    n = 0
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+        for label, saved_root, save_subdir in entries:
+            root = Path(saved_root)
+            base = root / save_subdir
+            if not base.exists():
+                continue
+            for pat in PLAYER_PATTERNS:
+                for fp in base.rglob(pat):
+                    try:
+                        z.write(fp, f"{label}/{fp.relative_to(root)}")
+                        n += 1
+                    except (OSError, ValueError):
+                        pass          # 使用中/読めないファイルはスキップ
+        cl = Path(cluster_dir) if cluster_dir else None
+        if cl and cl.exists():        # クラスタ転送中のキャラ/アイテムも保護対象
+            for fp in cl.rglob("*"):
+                if fp.is_file():
+                    try:
+                        z.write(fp, f"_cluster/{fp.relative_to(cl)}")
+                        n += 1
+                    except (OSError, ValueError):
+                        pass
+    _prune(d, "players", cfg.keep if keep is None else keep, progress)
+    progress(f"プレイヤーデータ: 完了 {dest.name}({n}ファイル)")
+    return str(dest)
+
+
 def ark_restore(backup_file: str, saved_root: str | Path,
                 progress=lambda t: None) -> None:
     """マップ単位のバックアップをSavedへ展開する(zip内の save_subdir/ を元位置へ)。"""

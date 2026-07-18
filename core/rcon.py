@@ -23,6 +23,9 @@ class RconAuthError(RconError):
 
 
 class RconClient:
+    # 応答が途切れたと判断するまでの猶予(lenient時のみ)。
+    _SETTLE = 0.4
+
     def __init__(self, host: str, port: int, password: str, timeout: float = 5):
         self.host = host
         self.port = port
@@ -56,7 +59,8 @@ class RconClient:
         if self._sock is None:
             raise RconError("接続されていません")
         req_id = self._send(_TYPE_EXEC, cmd)
-        pkt_id, _, body = self._recv()
+        # strict=False = Palworld。長さフィールドも信用できないので寛容に読む。
+        pkt_id, _, body = self._recv(lenient=not strict)
         # PalworldのRCONは応答に要求IDを返さない(仕様非準拠)。strict=Falseで許容する。
         if strict and pkt_id != req_id:
             raise RconError("RCON応答のIDが一致しません")
@@ -74,18 +78,39 @@ class RconClient:
         self._sock.sendall(struct.pack("<i", len(payload)) + payload)
         return pkt_id
 
-    def _recv(self) -> tuple[int, int, str]:
+    def _recv(self, lenient: bool = False) -> tuple[int, int, str]:
         (length,) = struct.unpack("<i", self._read_exact(4))
-        payload = self._read_exact(length)
+        payload = self._read_exact(length, lenient=lenient)
         pkt_id, pkt_type = struct.unpack("<ii", payload[:8])
         body = payload[8:-2].decode("utf-8", "replace")
         return pkt_id, pkt_type, body
 
-    def _read_exact(self, n: int) -> bytes:
+    def _read_exact(self, n: int, lenient: bool = False) -> bytes:
+        """n バイト読む。lenient=True なら届いた分で打ち切ることを許す。
+
+        PalworldのRCONは応答に非ASCII(日本語のプレイヤー名など)が含まれると、
+        長さフィールドを実際の送信バイト数より大きく申告してくる(実測: 非ASCII1文字につき
+        +2バイト。「サイオン」4文字なら 申告97 / 実際89)。厳密に n バイト待つと、
+        永遠に来ない差分を待ち続けてタイムアウトする。届いた分が本文としては完全なので、
+        データが途切れたらそこで打ち切る。
+        """
         chunks = b""
-        while len(chunks) < n:
-            chunk = self._sock.recv(n - len(chunks))
-            if not chunk:
-                raise RconError("サーバーが接続を切断しました")
-            chunks += chunk
+        try:
+            while len(chunks) < n:
+                try:
+                    chunk = self._sock.recv(n - len(chunks))
+                except socket.timeout:
+                    if lenient and chunks:
+                        return chunks
+                    raise
+                if not chunk:
+                    if lenient and chunks:
+                        return chunks
+                    raise RconError("サーバーが接続を切断しました")
+                chunks += chunk
+                if lenient:
+                    self._sock.settimeout(self._SETTLE)   # 続きが来ないなら即打ち切る
+        finally:
+            if lenient:
+                self._sock.settimeout(self.timeout)
         return chunks

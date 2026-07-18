@@ -38,3 +38,6 @@ dist/
 logs/
 scratchpad/
 *.tmp
+uiscale.json
+tasks.json
+sched_state.json

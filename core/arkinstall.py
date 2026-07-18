@@ -25,7 +25,8 @@ def copy_install(source: str | Path, dest: str | Path,
     args = ["robocopy", str(source), str(dest),
             "/E", "/MT:16", "/R:1", "/W:1", "/NFL", "/NDL", "/NJH", "/NP", "/NC", "/BYTES"]
     proc = subprocess.run(args, capture_output=True, text=True,
-                          errors="replace", timeout=timeout)
+                          errors="replace", timeout=timeout,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if proc.returncode >= 8:                  # robocopyは0-7が成功、8以上が失敗
         raise RuntimeError(
             f"robocopy失敗(code {proc.returncode}):\n{(proc.stdout or '')[-600:]}")

@@ -1,0 +1,48 @@
+"""ARK の DynamicColorset で使える色名とhex(色見本用)。ark.wiki.gg/wiki/Color_IDs 準拠。
+
+色選択ダイアログでスウォッチを描くために hex を持つ。DynamicColorset に渡すのは name。
+"""
+ARK_COLORS = [
+    ("Red", "#FF0000"), ("Blue", "#0000FF"), ("Green", "#00FF00"),
+    ("Yellow", "#FFFF00"), ("Cyan", "#00FFFF"), ("Magenta", "#FF00FF"),
+    ("Light Green", "#C0FFBA"), ("Light Grey", "#C8CACA"), ("Light Brown", "#786759"),
+    ("Light Orange", "#FFB46C"), ("Light Yellow", "#FFFA8A"), ("Light Red", "#FF756C"),
+    ("Dark Grey", "#7B7B7B"), ("Black", "#3B3B3B"), ("Brown", "#593A2A"),
+    ("Dark Green", "#224900"), ("Dark Red", "#812118"), ("White", "#FFFFFF"),
+    ("Dino Light Red", "#FFA8A8"), ("Dino Dark Red", "#592B2B"),
+    ("Dino Light Orange", "#FFB694"), ("Dino Dark Orange", "#88532F"),
+    ("Dino Light Yellow", "#CACAA0"), ("Dino Dark Yellow", "#94946C"),
+    ("Dino Light Green", "#E0FFE0"), ("Dino Medium Green", "#799479"),
+    ("Dino Dark Green", "#224122"), ("Dino Light Blue", "#D9E0FF"),
+    ("Dino Dark Blue", "#394263"), ("Dino Light Purple", "#E4D9FF"),
+    ("Dino Dark Purple", "#403459"), ("Dino Light Brown", "#FFE0BA"),
+    ("Dino Medium Brown", "#948575"), ("Dino Dark Brown", "#594E41"),
+    ("Dino Darker Grey", "#595959"), ("Dino Albino", "#FFFFFF"),
+    ("BigFoot0", "#B79683"), ("BigFoot4", "#EADAD5"), ("BigFoot5", "#D0A794"),
+    ("WolfFur", "#C3B39F"), ("DarkWolfFur", "#887666"),
+    ("DragonBase0", "#A0664B"), ("DragonBase1", "#CB7956"), ("DragonFire", "#BC4F00"),
+    ("DragonGreen0", "#79846C"), ("DragonGreen1", "#909C79"),
+    ("DragonGreen2", "#A5A48B"), ("DragonGreen3", "#74939C"),
+    ("WyvernPurple0", "#787496"), ("WyvernPurple1", "#B0A2C0"),
+    ("WyvernBlue0", "#6281A7"), ("WyvernBlue1", "#485C75"),
+    ("Dino Medium Blue", "#5FA4EA"), ("Dino Deep Blue", "#4568D4"),
+    ("NearWhite", "#EDEDED"), ("NearBlack", "#515151"),
+    ("DarkTurquoise", "#184546"), ("MediumTurquoise", "#007060"),
+    ("Turquoise", "#00C5AB"), ("GreenSlate", "#40594C"), ("Sage", "#3E4F40"),
+    ("DarkWarmGray", "#3B3938"), ("MediumWarmGray", "#585554"),
+    ("LightWarmGray", "#9B9290"), ("DarkCement", "#525B56"),
+    ("LightCement", "#8AA196"), ("LightPink", "#E8B0FF"), ("DeepPink", "#FF119A"),
+    ("DarkViolet", "#730046"), ("DarkMagenta", "#B70042"), ("BurntSienna", "#7E331E"),
+    ("MediumAutumn", "#A93000"), ("Vermillion", "#EF3100"), ("Coral", "#FF5834"),
+    ("Orange", "#FF7F00"), ("Peach", "#FFA73A"), ("LightAutumn", "#AE7000"),
+    ("Mustard", "#949427"), ("ActualBlack", "#171717"), ("MidnightBlue", "#191D36"),
+    ("DarkBlue", "#152B3A"), ("BlackSands", "#302531"), ("LemonLime", "#A8FF44"),
+    ("Mint", "#38E985"), ("Jade", "#008840"), ("PineGreen", "#0F552E"),
+    ("SpruceGreen", "#005B45"), ("LeafGreen", "#5B9725"), ("DarkLavender", "#5E275F"),
+    ("MediumLavender", "#853587"), ("Lavender", "#BD77BE"), ("DarkTeal", "#0E404A"),
+    ("MediumTeal", "#105563"), ("Teal", "#14849C"), ("PowderBlue", "#82A7FF"),
+    ("Glacial", "#ACEAFF"), ("Cammo", "#505118"), ("DryMoss", "#766E3F"),
+    ("Custard", "#C0BD5E"), ("Cream", "#F4FFC0"),
+]
+
+ALL_NAMES = [n for n, _h in ARK_COLORS]

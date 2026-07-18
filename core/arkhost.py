@@ -136,6 +136,11 @@ class ArkHost:
         self.runner = runner
 
     # ---- 状態 ----
+    def uptime_seconds(self) -> int | None:
+        """このマップのプロセスの稼働秒数。停止中/取得不可は None。"""
+        return uptimes_by_port(self.runner, self.cfg.process_name).get(
+            self.cfg.game_port)
+
     def is_running(self) -> bool:
         """このマップ固有のプロセスが動いているか。複数マップは game_port で識別する。"""
         gp = self.cfg.game_port
@@ -154,6 +159,46 @@ class ArkHost:
 
     def status(self) -> str:
         return "active" if self.is_running() else "inactive"
+
+    READY_MARKER = "advertising for join"
+
+    def client_version(self) -> str | None:
+        """クライアントと同じゲームバージョン(例 '92.4')をログから取得する。
+
+        ビルド番号(24254574等)はプレイヤーには意味が伝わらないため、ログ先頭の
+        'ARK Version: X.Y' を拾って表示に使う。ログはマップ専用ログ(gsm_<label>.log)。
+        起動時に書かれる行なので、末尾ではなく先頭側から探す。
+        """
+        p = self.cfg.log_path
+        if not p.exists():
+            return None
+        try:
+            with p.open("rb") as f:
+                head = f.read(64 * 1024)     # 先頭64KBに起動時の版数行がある
+        except OSError:
+            return None
+        m = re.search(r"ARK Version:\s*([\d.]+)",
+                      head.decode("utf-8", "replace"))
+        return m.group(1) if m else None
+
+    def is_advertising(self) -> bool:
+        """ログに 'advertising for join'(起動完了の合図)が出ているか。
+
+        ASAは「プロセス起動 → 数十秒後に advertising for join」で、advertisingが出て
+        初めて実際に参加可能になる。プロセスの有無だけでは『起動中』を『稼働中』と
+        誤表示してしまうため、この行で本当の起動完了を判定する。
+        注意: ログは起動毎に切り詰められるが長時間稼働で巨大化し、この行は末尾から
+        押し出される。よって呼び出し側(監視)は一度Trueになったらラッチし、再確認しない。
+        """
+        p = self.cfg.log_path
+        try:
+            size = p.stat().st_size
+            with p.open("rb") as f:
+                f.seek(max(0, size - 512 * 1024))   # 起動直後はログが小さいので末尾で足りる
+                data = f.read()
+        except OSError:
+            return False
+        return self.READY_MARKER in data.decode("utf-8", "replace")
 
     def rcon_params(self) -> tuple[str, int, str]:
         gus = self.cfg.gus_path
@@ -252,6 +297,33 @@ class ArkHost:
         text = data.decode("utf-8", "replace")
         return "\n".join(text.splitlines()[-lines:])
 
+    def tail_log_since(self, offset: int = 0, lines: int = 400) -> tuple[str, int]:
+        """(増えた分のテキスト, 新しいオフセット) を返す。ライブ表示用。
+
+        毎回ファイル全体(=数MB相当のJSON)を返すと通信も描画も無駄なので、
+        前回読んだバイト位置以降だけを読む。offset=0 なら末尾 lines 行を返す
+        (初回表示用)。ログが縮んだ(ローテートされた)場合は先頭から読み直す。
+        """
+        p = self.cfg.log_path
+        if not p.exists():
+            return ("(ログファイルがまだありません)\n"
+                    f"想定パス: {p}", 0)
+        try:
+            size = p.stat().st_size
+            if offset and offset <= size:
+                with p.open("rb") as f:      # 前回位置から増分だけ読む
+                    f.seek(offset)
+                    data = f.read()
+                return data.decode("utf-8", "replace"), size
+            # 初回 or ローテート検知 → 末尾lines行
+            with p.open("rb") as f:
+                f.seek(max(0, size - 512 * 1024))   # 末尾512KBだけ見れば十分
+                data = f.read()
+            text = data.decode("utf-8", "replace")
+            return "\n".join(text.splitlines()[-lines:]), size
+        except OSError as e:
+            return f"(ログを読み取れません: {e})", 0
+
     def stop(self, progress=lambda t: None) -> None:
         if not self.is_running():
             return
@@ -290,6 +362,14 @@ class ArkHost:
         """野生恐竜を全消去(自然リスポーンされる)。DestroyWildDinos。"""
         return self.rcon_command("DestroyWildDinos")
 
+    def respawn_wild_dinos_now(self, progress=lambda t: None) -> str:
+        """今すぐ野生恐竜をリスポーンし、ゲーム内へ告知する(手動リスポーン用)。"""
+        self.announce("[GSM] Respawning wild dinosaurs...")
+        resp = self.destroy_wild_dinos()
+        self.announce("[GSM] Wild dinosaurs have respawned.")
+        progress(f"野生恐竜をリスポーンしました ({resp})")
+        return resp
+
     def wait_ready(self, timeout: int = 360, progress=lambda t: None) -> bool:
         """起動完了(RCONが応答する)まで待つ。落ちたら/超過でFalse。
 
@@ -317,6 +397,7 @@ class ArkHost:
         for attempt in range(2):               # 念のため1回リトライ
             try:
                 self.destroy_wild_dinos()
+                self.announce("[GSM] Wild dinos have respawned.")
                 progress("野生恐竜をリスポーンしました(DestroyWildDinos)")
                 return
             except Exception as e:
@@ -339,23 +420,67 @@ class ArkHost:
         if respawn_dinos:
             self.respawn_wild_dinos_after_ready(progress=progress)
 
-    def stop_with_notice(self, notify: bool = True,
+    def stop_with_notice(self, notify: bool = True, reason: str = "",
                          progress=lambda t: None) -> None:
-        """プレイヤーが居れば60/30/10秒前にチャット予告してから停止する。"""
+        """プレイヤーが居れば60/30/10秒前にチャット予告してから停止する。
+
+        reason を指定すると予告文に理由を添える(例: "for a server update")。"""
         if notify and self.is_running() and self.num_players() > 0:
-            self.announce_countdown(notice_schedule("shut down"), progress=progress)
-            self.announce("[GSM] Shutting down now. Thanks for playing!")
+            self.announce_countdown(notice_schedule("shut down", reason), progress=progress)
+            tail = f" {reason}" if reason else ""
+            self.announce(f"[GSM] Shutting down now{tail}. Thanks for playing!")
         elif self.is_running():
             progress("プレイヤー不在のため予告を省略して停止します")
         self.stop(progress=progress)
 
 
-def notice_schedule(action_word: str) -> list[tuple[int, str]]:
-    """再起動/停止の予告文(英数字。このASAは日本語チャットを描画できないため)。"""
+def notice_schedule(action_word: str, reason: str = "") -> list[tuple[int, str]]:
+    """再起動/停止の予告文(英数字。このASAは日本語チャットを描画できないため)。
+
+    reason を指定すると各予告の末尾に理由を添える。"""
     cap = action_word.capitalize()
+    tail = f" {reason}" if reason else ""
     return [
-        (60, f"[GSM] Server will {action_word.upper()} in 60 seconds. "
+        (60, f"[GSM] Server will {action_word.upper()} in 60 seconds{tail}. "
              "Please find a safe spot and log off."),
-        (30, f"[GSM] {cap} in 30 seconds..."),
+        (30, f"[GSM] {cap} in 30 seconds...{tail}"),
         (10, f"[GSM] {cap} in 10 seconds!"),
     ]
+
+
+def uptimes_by_port(runner, process_name: str = "ArkAscendedServer") -> dict[int, int]:
+    r"""全ARKプロセスの (ゲームポート -> 稼働秒数)。
+
+    マップごとに問い合わせると重いので、PowerShell1回で全プロセスの
+    「稼働秒数<TAB>コマンドライン」を取り、ポート判定はPython側の正規表現で行う
+    (RCONPort/Queryport と区別するため is_running と同じ [?&"\s]Port= を使う)。
+    """
+    ps = ('Get-CimInstance Win32_Process -Filter "Name=\'' + process_name + '.exe\'" '
+          '| ForEach-Object { [string][int](((Get-Date) - $_.CreationDate).TotalSeconds) '
+          '+ "`t" + $_.CommandLine }')
+    r = runner.run_ps(ps, timeout=25)
+    out: dict[int, int] = {}
+    for line in (r.stdout or "").splitlines():
+        secs, _, cmd = line.partition("\t")
+        m = re.search(r'[?&"\s]Port=(\d+)', cmd)
+        if not m:
+            continue
+        try:
+            out[int(m.group(1))] = int(secs.strip())
+        except ValueError:
+            pass
+    return out
+
+
+def format_uptime(seconds: int | None) -> str:
+    """稼働秒数を「3日4時間12分」形式に。停止中/不明は ―。"""
+    if seconds is None or seconds < 0:
+        return "―"
+    d, rem = divmod(int(seconds), 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    if d:
+        return f"{d}日{h}時間{m}分"
+    if h:
+        return f"{h}時間{m}分"
+    return f"{m}分"

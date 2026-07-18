@@ -37,7 +37,11 @@ DYN_SETTINGS = [
     ("HexagonRewardMultiplier", "float", "ヘキサゴン報酬倍率", "1.0"),
     ("MateBoostEffectMultiplier", "float", "つがいブースト効果倍率", "1.0"),
 ]
-DYN_KEYS = {k for k, _t, _l, _d in DYN_SETTINGS}
+# カラフル野生恐竜(Dynamic Colorsets)。イベントもmodも使わずにiniで色を有効化できる、
+# ARK公式の dynamic config 機能。ActiveEventColors=custom + DynamicColorset=<色名,...>。
+# 反映は ForceUpdateDynamicConfig(無停止)＋既存個体は destroywilddinos で置き換わる。
+COLOR_KEYS = {"ActiveEventColors", "DynamicColorset"}
+DYN_KEYS = {k for k, _t, _l, _d in DYN_SETTINGS} | COLOR_KEYS
 
 
 @dataclass

@@ -26,19 +26,31 @@ class RestartJob:
     enabled: bool = True
     respawn_dinos: bool = False   # 再起動後に野生恐竜をリスポーン(ARKのみ)
     do_backup: bool = False       # バックアップを実行
-    do_restart: bool = True       # 再起動を実行(両方ONならバックアップ→再起動)
+    do_update: bool = False       # 更新があれば適用(停止→SteamCMD更新→元が稼働中なら起動)
+    do_restart: bool = True       # 再起動を実行(バックアップ→更新→再起動の順に実行)
     rolling: bool = False         # ARK全マップ: 1台ずつ順に(前が復帰してから次)
     order: list = field(default_factory=list)  # ローリング順(map_labelの並び)
+    interval_min: int = 0         # >0 なら間隔モード(N分毎に定期バックアップ)。時刻/曜日は無視
+    keep: int = 0                 # このジョブ専用の保持世代数(0=config.yamlの既定を使う)
+
+    def is_interval(self) -> bool:
+        return self.interval_min > 0
 
     def action_text(self) -> str:
+        if self.is_interval():
+            return "バックアップ(稼働中)"
         parts = []
         if self.do_backup:
             parts.append("バックアップ")
+        if self.do_update:
+            parts.append("更新")
         if self.do_restart:
             parts.append("再起動")
         return " → ".join(parts) if parts else "(なし)"
 
     def times_text(self) -> str:
+        if self.is_interval():
+            return f"{self.interval_min}分毎"
         return ", ".join(self.times) if self.times else "(なし)"
 
     def days_text(self) -> str:
@@ -77,8 +89,11 @@ def load_jobs(path: str | Path) -> list[RestartJob]:
                 enabled=bool(j.get("enabled", True)),
                 respawn_dinos=bool(j.get("respawn_dinos", False)),
                 do_backup=do_backup, do_restart=do_restart,
+                do_update=bool(j.get("do_update", False)),
                 rolling=bool(j.get("rolling", False)),
-                order=list(j.get("order", []))))
+                order=list(j.get("order", [])),
+                interval_min=int(j.get("interval_min", 0) or 0),
+                keep=int(j.get("keep", 0) or 0)))
         except (KeyError, TypeError, ValueError):
             continue
     return out
@@ -110,4 +125,5 @@ def due_jobs(jobs: list[RestartJob], now: datetime) -> list[RestartJob]:
     hhmm = now.strftime("%H:%M")
     wd = now.weekday()               # 0=月 .. 6=日
     return [j for j in jobs
-            if j.enabled and hhmm in j.times and j.runs_on(wd)]
+            if j.enabled and not j.is_interval()
+            and hhmm in j.times and j.runs_on(wd)]
