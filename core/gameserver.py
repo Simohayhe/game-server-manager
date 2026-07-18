@@ -181,8 +181,8 @@ class GameServer:
         (例: 10分の時点で0人なら残りを待たない)。
         """
         jp = "再起動" if action == "restart" else "停止"
-        # PalworldはRCON経由の日本語が文字化けする(ゲーム自体は日本語OKだがRCON送信の
-        # エンコードが非対応)ため、画面に出す文面は英数字(ASCII)にする。
+        # Palworldでプレイヤーにメッセージが見えるのは Broadcast(左上[SYSTEM]チャット)だけ。
+        # Shutdown は画面に何も出さない。日本語はRCON送信で化けるため英数字(ASCII)で送る。
         en = "restart" if action == "restart" else "shutdown"
         try:
             n = self.player_count()
@@ -194,25 +194,21 @@ class GameServer:
             return
         mins = NOTICE_MINUTES            # (15, 10, 5, 1)
         for idx, m in enumerate(mins):
-            # PalworldのShutdown <秒> <文> は画面中央にカウントダウンを表示する。
-            # 空白は文が切れる仕様なので _pal_shutdown 側でアンダースコアに置換する。
-            self._pal_shutdown(m * 60, f"Server {en} in {m} min")
+            self._pal_broadcast(f"Server {en} in {m} min - please log off safely")
             progress(f"予告(残り{m}分): {jp}")
             nxt = mins[idx + 1] if idx + 1 < len(mins) else 0
             gap = (m - nxt) * 60
-            if nxt == 0:
-                # 最終区間: Shutdownがサーバーを保存して落とすのを待つ(+余裕5秒)
-                self._wait_or_empty(gap + 5, progress)
-                break
-            if self._wait_or_empty(gap, progress):
+            if gap and self._wait_or_empty(gap, progress):
                 progress(f"プレイヤー不在を検知 → 待たずに{jp}します")
                 break
+        self._pal_broadcast(f"Server {en} now")
         self._palworld_finalize(action, progress)
 
-    def _pal_shutdown(self, seconds: int, message: str) -> None:
-        """Palworldの画面中央カウントダウン(失敗しても本処理は止めない)。"""
+    def _pal_broadcast(self, message: str) -> None:
+        """Palworldの左上[SYSTEM]チャットへ表示(失敗しても本処理は止めない)。
+        空白は文が切れる仕様なのでアンダースコアに置換する。"""
         try:
-            self.rcon_command(f"Shutdown {int(seconds)} " + message.replace(" ", "_"))
+            self.rcon_command("Broadcast " + message.replace(" ", "_"))
         except Exception:
             pass
 
