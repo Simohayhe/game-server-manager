@@ -40,6 +40,7 @@ class Monitor:
         self._prev_ready_ark: dict[int, bool] = {}
         self._prev_ready_srv: dict[str, bool] = {}
         self._ark_ready_latch: dict[int, bool] = {}  # 一度advertisingを見たらラッチ
+        self._ark_log_size: dict[int, int] = {}      # ログサイズ(再起動=切り詰めの検知用)
         self._prev_names: dict[str, set] = {}   # key -> 前回の接続者名(入退室判定用)
         self._last_build_check = 0.0
         self._pal_update_check: dict[str, float] = {}   # name -> 最終更新確認時刻
@@ -305,7 +306,15 @@ class Monitor:
         """
         if not running:
             self._ark_ready_latch[i] = False
+            self._ark_log_size[i] = 0
             return False
+        # ログが縮んだ=ARKが起動時に切り詰めた=再起動が起きた → ラッチ解除して起動中に戻す。
+        # (監視が「停止の一瞬」を取りこぼしても、これで確実に再起動を検知できる)
+        size = ah.log_size()
+        prev_size = self._ark_log_size.get(i)
+        if prev_size is not None and size < prev_size:
+            self._ark_ready_latch[i] = False
+        self._ark_log_size[i] = size
         if self._ark_ready_latch.get(i):
             return True                  # 既に起動完了を確認済み(ラッチ)
         if prev_running is None:
