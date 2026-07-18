@@ -92,7 +92,9 @@ class Monitor:
                 except Exception:
                     pass
             prev_running = self._prev_ark.get(i)
-            ready = self._ark_ready(i, running, prev_running, ah)
+            ready = self._ark_ready(
+                i, running, prev_running, ah,
+                uptime_sec=ups.get(ah.cfg.game_port) if running else None)
             self._diff_players(f"ark:{i}", "ark", ah.cfg.display_name,
                                players if ready else None)   # 起動完了後のみ入退室判定
             self.state.set_ark(
@@ -297,7 +299,8 @@ class Monitor:
                 print("入退室通知で例外:", exc)
 
     # ---- 起動完了(ready)の判定 ----
-    def _ark_ready(self, i: int, running: bool, prev_running, ah) -> bool:
+    def _ark_ready(self, i: int, running: bool, prev_running, ah,
+                   uptime_sec=None) -> bool:
         """ARKが本当に起動完了(advertising for join)しているか。
 
         プロセスの有無だけでは「起動中」を「稼働中」と誤表示するため、ログの
@@ -318,8 +321,16 @@ class Monitor:
         if self._ark_ready_latch.get(i):
             return True                  # 既に起動完了を確認済み(ラッチ)
         if prev_running is None:
-            self._ark_ready_latch[i] = True   # 監視開始時点で起動済み=稼働中扱い
-            return True
+            # 監視開始時点で既に動いている。advertising済み or 十分長く稼働(=起動は完了済み)
+            # なら稼働中。起動直後(uptime小)でまだ未advertisingなら起動中。
+            try:
+                adv = ah.is_advertising()
+            except Exception:
+                adv = False
+            if adv or (uptime_sec or 0) >= 300:
+                self._ark_ready_latch[i] = True
+                return True
+            return False                 # 起動直後 = 起動中
         if not prev_running:
             # 起動を検知した最初の周期。ログはこの直後にARKが切り詰めるので、まだ
             # 前セッションの advertising 行が残っている恐れがある。この周期では判定せず、
