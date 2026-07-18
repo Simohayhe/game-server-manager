@@ -18,6 +18,9 @@ from pathlib import Path
 
 from .rcon import RconClient, RconError
 
+NOTICE_MINUTES = (15, 10, 5, 1)   # 予告カウントダウンのタイミング(残り分・降順)
+PLAYER_POLL_SEC = 30              # カウントダウン中の在席チェック間隔(秒)
+
 
 @dataclass
 class ArkHostConfig:
@@ -414,12 +417,43 @@ class ArkHost:
                 progress(f"DestroyWildDinos に失敗: {e}")
 
     # ---- 予告付き 再起動 / 停止 ----
+    def _notice_minutes(self, verb: str, reason: str, progress) -> None:
+        """15→10→5→1分の順にチャット予告する(ARKはRCON中央表示不可のためチャット)。
+
+        カウントダウン中も在席を監視し、途中で誰もいなくなったら待たずに即実行する。
+        """
+        tail = f" {reason}" if reason else ""
+        mins = NOTICE_MINUTES              # (15, 10, 5, 1)
+        for idx, m in enumerate(mins):
+            self.announce(f"[GSM] Server will {verb.upper()} in {m} minute(s){tail}. "
+                          "Please log off safely.")
+            progress(f"予告(残り{m}分): {verb}")
+            nxt = mins[idx + 1] if idx + 1 < len(mins) else 0
+            gap = (m - nxt) * 60
+            if gap and self._wait_or_empty(gap, progress):
+                progress(f"プレイヤー不在を検知 → 待たずに{verb}します")
+                return
+
+    def _wait_or_empty(self, seconds: int, progress=lambda t: None) -> bool:
+        """seconds秒待つ。POLL毎に在席確認し、0人になったら即Trueで戻る。"""
+        waited = 0
+        while waited < seconds:
+            step = min(PLAYER_POLL_SEC, seconds - waited)
+            time.sleep(step)
+            waited += step
+            try:
+                if self.num_players() == 0:
+                    return True
+            except Exception:
+                pass
+        return False
+
     def restart_with_notice(self, notify: bool = True, respawn_dinos: bool = False,
                             progress=lambda t: None) -> None:
-        """プレイヤーが居れば60/30/10秒前にチャット予告してから再起動する。
+        """プレイヤーが居れば15/10/5/1分前にチャット予告してから再起動する。
         respawn_dinos=True なら起動完了後に野生恐竜をリスポーンする。"""
         if notify and self.is_running() and self.num_players() > 0:
-            self.announce_countdown(notice_schedule("restart"), progress=progress)
+            self._notice_minutes("restart", "", progress)
             self.announce("[GSM] Restarting now. Back in ~2 minutes.")
         elif self.is_running():
             progress("プレイヤー不在のため予告を省略して再起動します")
@@ -429,11 +463,11 @@ class ArkHost:
 
     def stop_with_notice(self, notify: bool = True, reason: str = "",
                          progress=lambda t: None) -> None:
-        """プレイヤーが居れば60/30/10秒前にチャット予告してから停止する。
+        """プレイヤーが居れば15/10/5/1分前にチャット予告してから停止する。
 
         reason を指定すると予告文に理由を添える(例: "for a server update")。"""
         if notify and self.is_running() and self.num_players() > 0:
-            self.announce_countdown(notice_schedule("shut down", reason), progress=progress)
+            self._notice_minutes("shut down", reason, progress)
             tail = f" {reason}" if reason else ""
             self.announce(f"[GSM] Shutting down now{tail}. Thanks for playing!")
         elif self.is_running():

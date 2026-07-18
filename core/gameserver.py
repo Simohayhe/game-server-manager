@@ -15,6 +15,9 @@ from .transport import SSHTransport
 
 RCON_FAIL = "RCON接続不可"        # players() が失敗を示す接頭辞(player_count が判定に使う)
 
+NOTICE_MINUTES = (15, 10, 5, 1)   # 予告カウントダウンのタイミング(残り分・降順)
+PLAYER_POLL_SEC = 30              # カウントダウン中の在席チェック間隔(秒)
+
 
 @dataclass
 class RconConfig:
@@ -135,7 +138,7 @@ class GameServer:
             pass
 
     def _notice_countdown(self, verb: str, progress, seconds=(60, 30, 10)) -> None:
-        """プレイヤーが居れば seconds の各タイミングで予告する(降順)。"""
+        """プレイヤーが居れば seconds の各タイミングで予告する(降順・Minecraft用)。"""
         try:
             n = self.player_count()
         except Exception:
@@ -152,17 +155,94 @@ class GameServer:
                 time.sleep(wait)
 
     def restart_with_notice(self, progress=lambda t: None) -> None:
-        """プレイヤーが居れば60/30/10秒前に予告してから再起動する。"""
+        """プレイヤーが居れば予告してから再起動する。"""
+        if self.profile.game == "palworld":
+            self._palworld_notice("restart", progress)
+            return
         self._notice_countdown("restart", progress)
         self._save_world()
         progress("再起動中…")
         self.restart()
 
     def stop_with_notice(self, progress=lambda t: None) -> None:
+        if self.profile.game == "palworld":
+            self._palworld_notice("stop", progress)
+            return
         self._notice_countdown("shutdown", progress)
         self._save_world()
         progress("停止中…")
         self.stop()
+
+    # ---- Palworld: 画面中央カウントダウン(Shutdown) + 在席監視で無人なら即実行 ----
+    def _palworld_notice(self, action: str, progress) -> None:
+        """15→10→5→1分の順に画面中央へカウントダウンを出し、時間になったら実行。
+
+        カウントダウン中も在席を監視し、途中で誰もいなくなったら待たずに即実行する
+        (例: 10分の時点で0人なら残りを待たない)。
+        """
+        jp = "再起動" if action == "restart" else "停止"
+        # PalworldはRCON経由の日本語が文字化けする(ゲーム自体は日本語OKだがRCON送信の
+        # エンコードが非対応)ため、画面に出す文面は英数字(ASCII)にする。
+        en = "restart" if action == "restart" else "shutdown"
+        try:
+            n = self.player_count()
+        except Exception:
+            n = None
+        if n == 0:                       # 誰も居ない → 予告不要・即実行
+            progress(f"プレイヤー不在のため予告を省略して{jp}します")
+            self._palworld_finalize(action, progress)
+            return
+        mins = NOTICE_MINUTES            # (15, 10, 5, 1)
+        for idx, m in enumerate(mins):
+            # PalworldのShutdown <秒> <文> は画面中央にカウントダウンを表示する。
+            # 空白は文が切れる仕様なので _pal_shutdown 側でアンダースコアに置換する。
+            self._pal_shutdown(m * 60, f"Server {en} in {m} min")
+            progress(f"予告(残り{m}分): {jp}")
+            nxt = mins[idx + 1] if idx + 1 < len(mins) else 0
+            gap = (m - nxt) * 60
+            if nxt == 0:
+                # 最終区間: Shutdownがサーバーを保存して落とすのを待つ(+余裕5秒)
+                self._wait_or_empty(gap + 5, progress)
+                break
+            if self._wait_or_empty(gap, progress):
+                progress(f"プレイヤー不在を検知 → 待たずに{jp}します")
+                break
+        self._palworld_finalize(action, progress)
+
+    def _pal_shutdown(self, seconds: int, message: str) -> None:
+        """Palworldの画面中央カウントダウン(失敗しても本処理は止めない)。"""
+        try:
+            self.rcon_command(f"Shutdown {int(seconds)} " + message.replace(" ", "_"))
+        except Exception:
+            pass
+
+    def _wait_or_empty(self, seconds: int, progress=lambda t: None) -> bool:
+        """seconds秒待つ。POLL毎に在席確認し、0人になったら即Trueで戻る。"""
+        waited = 0
+        while waited < seconds:
+            step = min(PLAYER_POLL_SEC, seconds - waited)
+            time.sleep(step)
+            waited += step
+            try:
+                if self.player_count() == 0:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _palworld_finalize(self, action: str, progress) -> None:
+        """実際の停止・再起動を確定する(systemdで確実に)。
+
+        Shutdownで既に落ちていてもsystemctlは冪等: restart=起動, stop=停止のまま。
+        Saveはベストエフォート(既に落ちていればRCON失敗を握り潰す)。
+        """
+        self._save_world()
+        if action == "restart":
+            progress("再起動中…")
+            self.restart()
+        else:
+            progress("停止中…")
+            self.stop()
 
     def _run_action(self, action: str) -> None:
         result = self._ssh.run(self.profile.command_for(action), timeout=120)
