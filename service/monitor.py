@@ -20,6 +20,9 @@ from core.players import player_names
 ARK_POLL_SEC = 30
 SERVER_POLL_SEC = 30
 BUILD_POLL_SEC = 6 * 3600          # 最新ビルドの確認は6時間毎(Steamを叩きすぎない)
+DNS_POLL_SEC = 60                  # DNS健全性チェックは60秒毎
+DNS_RENOTIFY_SEC = 5 * 60          # 障害継続中は5分毎に再通知(気づけるように連続通知)
+DNS_EXTERNAL_NAME = "www.google.com"   # 再帰解決の確認用(外部名)
 
 
 class Monitor:
@@ -46,16 +49,93 @@ class Monitor:
         self._pal_update_check: dict[str, float] = {}   # name -> 最終更新確認時刻
         self._last_pubstat = 0.0
         self._vm_list_cache: list[dict] = []
+        self._dns_ok = True                 # 直近のDNS健全性
+        self._dns_fail_since = 0.0
+        self._dns_last_notify = 0.0
 
     def start(self) -> None:
         for target, name in ((self._ark_loop, "gsm-mon-ark"),
-                             (self._server_loop, "gsm-mon-srv")):
+                             (self._server_loop, "gsm-mon-srv"),
+                             (self._dns_loop, "gsm-mon-dns")):
             t = threading.Thread(target=target, name=name, daemon=True)
             t.start()
             self._threads.append(t)
 
     def stop(self) -> None:
         self._stop.set()
+
+    # ---- DNS健全性監視(外部参加の生命線。壊れたらDiscordへ連続通知) ----
+    def _dns_loop(self) -> None:
+        cfg = getattr(self.ctx, "config", None)
+        if not cfg or not getattr(cfg, "dns", None):
+            return                          # ipam DNS未設定なら監視しない
+        while not self._stop.is_set():
+            try:
+                self._poll_dns()
+            except Exception as exc:
+                print("DNS監視で例外:", exc)
+            self._stop.wait(DNS_POLL_SEC)
+
+    def _dns_internal_name(self) -> str | None:
+        """ゾーン内で確実に存在する名前(サーバーfqdn優先、無ければ ipam.<domain>)。"""
+        dns = self.ctx.config.dns
+        for s in getattr(self.ctx.config, "servers", []) or []:
+            fq = getattr(s, "fqdn", None)
+            if fq and fq.endswith(dns.domain):
+                return fq
+        return f"ipam.{dns.domain}"
+
+    def _poll_dns(self) -> None:
+        from core import conntest
+        dns = self.ctx.config.dns
+        host = dns.host
+        problems = []
+        # 1) 再帰解決(外部名)= Recursorが生きているか
+        try:
+            if not conntest.dns_query(host, DNS_EXTERNAL_NAME, 1, timeout=4):
+                problems.append(f"外部名({DNS_EXTERNAL_NAME})を解決できない(再帰停止?)")
+        except Exception:
+            problems.append(f"DNSサーバー {host} が無応答(Recursor停止?)")
+        # 2) ゾーン解決(内部名)= 権威(simohaya.com)が生きているか
+        internal = self._dns_internal_name()
+        if internal:
+            try:
+                if not conntest.dns_query(host, internal, 1, timeout=4):
+                    problems.append(f"自ゾーン名({internal})を解決できない(権威停止?)")
+            except Exception:
+                problems.append(f"内部名({internal})の問い合わせ失敗")
+
+        now = time.time()
+        if not problems:                    # 正常
+            if not self._dns_ok:            # 障害→復旧
+                self._dns_ok = True
+                mins = int((now - self._dns_fail_since) / 60) if self._dns_fail_since else 0
+                self._notify_dns("dns_recover",
+                                 f"✅ DNS復旧: {host} が正常に解決できるようになりました"
+                                 f"(障害{mins}分)")
+            self._dns_fail_since = 0.0
+            return
+        # 障害あり
+        detail = " / ".join(problems)
+        if self._dns_ok:                    # 正常→障害: 初回通知
+            self._dns_ok = False
+            self._dns_fail_since = now
+            self._dns_last_notify = now
+            self._notify_dns("dns_down",
+                             "⚠ DNS障害を検知しました。\n" + detail +
+                             "\n→ 外部からのゲーム参加・名前解決ができなくなります。")
+        elif now - self._dns_last_notify >= DNS_RENOTIFY_SEC:   # 継続中: 連続通知
+            self._dns_last_notify = now
+            mins = int((now - self._dns_fail_since) / 60)
+            self._notify_dns("dns_down",
+                             f"⚠ DNS障害が継続中({mins}分)。\n" + detail)
+
+    def _notify_dns(self, event: str, text: str) -> None:
+        if self.notifier:
+            try:
+                self.notifier(event, text)      # game=None(DNSはゲーム非依存)
+            except Exception:
+                pass
 
     # ---- ARK ----
     def _ark_loop(self) -> None:

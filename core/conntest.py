@@ -41,13 +41,14 @@ def _read_name(data: bytes, offset: int) -> tuple[str, int]:
     return ".".join(labels), (end if jumped else offset)
 
 
-def dns_query(resolver: str, name: str, qtype: int, timeout: float = 5.0) -> list:
+def dns_query(resolver: str, name: str, qtype: int, timeout: float = 5.0,
+              port: int = 53) -> list:
     header = struct.pack(">HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)  # RD=1
     pkt = header + _encode_name(name) + struct.pack(">HH", qtype, 1)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(timeout)
     try:
-        s.sendto(pkt, (resolver, 53))
+        s.sendto(pkt, (resolver, port))
         data, _ = s.recvfrom(4096)
     finally:
         s.close()

@@ -25,6 +25,8 @@ DEFAULT_EVENTS = {
     "update": True,        # サーバー更新あり(ARK)
     "player_join": True,   # プレイヤー入室(誰がどのサーバーに入ったか)
     "player_leave": True,  # プレイヤー退室
+    "dns_down": True,      # DNS障害(名前解決できない=外部参加の生命線)
+    "dns_recover": True,   # DNS復旧
     "port": False,         # ポート開閉(既定OFF=うるさいので)
 }
 EVENT_LABELS = {
@@ -32,6 +34,7 @@ EVENT_LABELS = {
     "crash": "クラッシュ検知", "restart": "再起動",
     "backup": "バックアップ完了", "update": "更新あり",
     "player_join": "プレイヤー入室", "player_leave": "プレイヤー退室",
+    "dns_down": "DNS障害", "dns_recover": "DNS復旧",
     "port": "ポート開閉",
 }
 
