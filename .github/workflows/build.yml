@@ -1,0 +1,60 @@
+# GameServerManager.exe を GitHub Actions でビルドしてリリースに添付する。
+# SignPath Foundation(OSS署名)は「CIで検証可能にビルドされた成果物」を署名対象にするため、
+# ローカルビルドから CI ビルドへ移す。承認後、この後ろに SignPath 署名ステップを足す。
+name: build
+
+on:
+  push:
+    tags: ["v*"]        # タグ push で起動(例: git tag v2.1.0 && git push --tags)
+  workflow_dispatch: {} # 手動実行も可
+
+permissions:
+  contents: write       # リリースへの添付に必要
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 依存 + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: exe ビルド(単一)
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name GameServerManager `
+            --collect-all customtkinter `
+            --collect-submodules paramiko --collect-submodules core --collect-submodules service --collect-submodules gui `
+            --add-data "provisioners;provisioners" main_app.py
+
+      - name: 成果物をアップロード(検証用)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameServerManager
+          path: dist/GameServerManager.exe
+
+      # ↓ SignPath 承認後に有効化: dist の exe を署名して signed/ に受け取る
+      # - name: SignPath 署名
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: ${{ vars.SIGNPATH_ORG_ID }}
+      #     project-slug: game-server-manager
+      #     signing-policy-slug: release-signing
+      #     artifact-configuration-slug: exe
+      #     github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     output-artifact-directory: signed
+
+      - name: リリースに添付(タグpush時)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/GameServerManager.exe
