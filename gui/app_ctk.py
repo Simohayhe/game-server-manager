@@ -22,6 +22,8 @@ from .dashboard import Dashboard
 from .widgets import ACCENT, CARD, ERR, MUTED, OK, TEXT, LogView
 
 DEFAULT_BASE = "http://127.0.0.1:8770"
+APP_VERSION = "2.0.0"                            # リリースtagと比較して更新通知を出す
+GITHUB_REPO = "Simohayhe/game-server-manager"    # アップデート確認先
 UI_SCALES = {"80%": 0.8, "90%": 0.9, "100%": 1.0, "110%": 1.1, "125%": 1.25}
 
 
@@ -877,6 +879,25 @@ class App(ctk.CTk):
         self.host.pack(side="left", fill="both", expand=True, padx=16, pady=(6, 14))
         self.show("dash")
         self._health()
+        self._check_update()
+
+    def _check_update(self):
+        """起動時にGitHubの新バージョンを1回だけ確認(バックグラウンド)。"""
+        def job():
+            from core import updatecheck
+            return updatecheck.check_latest(GITHUB_REPO, APP_VERSION)
+
+        def done(res, err):
+            if err or not res or not res.get("update_available"):
+                return
+            self._update_url = res.get("url") or self._update_url
+            self.update_lbl.configure(
+                text=f"🔔 新バージョン {res.get('latest')}(クリック)")
+        self.worker.submit(job, done)
+
+    def _open_update(self):
+        import webbrowser
+        webbrowser.open(self._update_url)
 
     def _head(self):
         h = ctk.CTkFrame(self, fg_color=SIDE, corner_radius=0, height=48)
@@ -886,9 +907,17 @@ class App(ctk.CTk):
                      font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
         ctk.CTkLabel(h, text=" Game Server Manager", text_color=TEXT,
                      font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        ctk.CTkLabel(h, text=f" v{APP_VERSION}", text_color=MUTED,
+                     font=ctk.CTkFont(size=10)).pack(side="left")
         self.svc = ctk.CTkLabel(h, text="接続確認中…", text_color=MUTED,
                                 font=ctk.CTkFont(size=11))
         self.svc.pack(side="right", padx=14)
+        # 新バージョン通知(見つかった時だけ表示・クリックでリリース页へ)
+        self._update_url = f"https://github.com/{GITHUB_REPO}/releases"
+        self.update_lbl = ctk.CTkLabel(h, text="", text_color="#ffc27a", cursor="hand2",
+                                       font=ctk.CTkFont(size=11, weight="bold"))
+        self.update_lbl.pack(side="right", padx=6)
+        self.update_lbl.bind("<Button-1>", lambda _e: self._open_update())
         # 表示サイズ: 画面によって適正が変わるのでユーザーが変えられるようにする
         self._scale_menu = ctk.CTkOptionMenu(
             h, values=list(UI_SCALES), width=78, height=26, corner_radius=6,
