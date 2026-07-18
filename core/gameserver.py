@@ -152,7 +152,7 @@ class GameServer:
         if not n or n <= 0:
             return True
         if cancelable:
-            self._mc_chat_watch_init()       # カウントダウン前の発言を無視する基準を作る
+            self._log_chat_watch_init()      # カウントダウン前の発言を無視する基準を作る
         items = sorted(seconds, reverse=True)
         for i, sec in enumerate(items):
             hint = " (type 'no' in chat to cancel)" if cancelable else ""
@@ -174,8 +174,7 @@ class GameServer:
                             cancelable: bool = False) -> bool:
         """プレイヤーが居れば予告してから再起動する。戻り値: 中止されたら False。"""
         if self.profile.game == "palworld":
-            self._palworld_notice("restart", progress)   # Palworldはチャット読取不可=中止不可
-            return True
+            return self._palworld_notice("restart", progress, cancelable)
         if not self._notice_countdown("restart", progress, cancelable=cancelable):
             return False                     # プレイヤーが中止 → 再起動しない
         self._save_world()
@@ -192,8 +191,10 @@ class GameServer:
         progress("停止中…")
         self.stop()
 
-    # ---- Minecraft: サーバーログからチャットを読んで中止ワードを検出 ----
-    def _mc_chat_watch_init(self) -> None:
+    # ---- サーバーログからチャットを読んで中止ワードを検出 ----
+    #   Minecraft: `<Player> message` / Palworld: `[CHAT] <Player> message`
+    #   どちらもログに `<Player> message` の形で出るので同じ読み方で拾える。
+    def _log_chat_watch_init(self) -> None:
         """現在のログ末尾を『既読』として記録し、以降の新規発言だけを見る。"""
         self._chat_seen: set[str] = set()
         try:
@@ -202,11 +203,8 @@ class GameServer:
         except Exception:
             self._chat_seen = set()
 
-    def _mc_chat_has_cancel(self) -> bool:
-        """新規のチャット行に中止ワード(単独 no)があれば True。
-
-        Fabric/vanillaのチャットはログに `<Player> message` として出る。
-        """
+    def _log_chat_has_cancel(self) -> bool:
+        """新規のチャット行に中止ワード(単独 no)があれば True。"""
         try:
             lines = self.tail_log(60).splitlines()
         except Exception:
@@ -227,20 +225,21 @@ class GameServer:
         return hit
 
     def _chat_cancel_hit(self) -> bool:
-        """このサーバーのチャットに中止ワードが来たか(ゲームごとに読み方が違う)。
+        """このサーバーのチャットに中止ワードが来たか。
 
-        Minecraft=ログ / Palworld=読取手段なし(常に False)。
+        Minecraft も Palworld もサーバーログにチャットが出るのでログから読む。
         """
-        if self.profile.game == "minecraft":
-            return self._mc_chat_has_cancel()
+        if self.profile.game in ("minecraft", "palworld"):
+            return self._log_chat_has_cancel()
         return False
 
-    # ---- Palworld: 画面中央カウントダウン(Shutdown) + 在席監視で無人なら即実行 ----
-    def _palworld_notice(self, action: str, progress) -> None:
-        """15→10→5→1分の順に画面中央へカウントダウンを出し、時間になったら実行。
+    # ---- Palworld: Broadcast予告 + 在席/チャット監視 ----
+    def _palworld_notice(self, action: str, progress,
+                         cancelable: bool = False) -> bool:
+        """15→10→5→1分の順に Broadcast で予告し、時間になったら実行。
 
-        カウントダウン中も在席を監視し、途中で誰もいなくなったら待たずに即実行する
-        (例: 10分の時点で0人なら残りを待たない)。
+        カウントダウン中も監視し、誰もいなくなったら即実行、cancelable時に
+        チャットへ 'no' が来たら中止する。戻り値: 中止されたら False。
         """
         jp = "再起動" if action == "restart" else "停止"
         # Palworldでプレイヤーにメッセージが見えるのは Broadcast(左上[SYSTEM]チャット)だけ。
@@ -253,18 +252,29 @@ class GameServer:
         if n == 0:                       # 誰も居ない → 予告不要・即実行
             progress(f"プレイヤー不在のため予告を省略して{jp}します")
             self._palworld_finalize(action, progress)
-            return
+            return True
+        hint = " - type no in chat to cancel" if cancelable else ""
+        if cancelable:
+            self._log_chat_watch_init()  # カウントダウン前の発言を無視する
         mins = NOTICE_MINUTES            # (15, 10, 5, 1)
         for idx, m in enumerate(mins):
-            self._pal_broadcast(f"Server {en} in {m} min - please log off safely")
+            self._pal_broadcast(f"Server {en} in {m} min - please log off safely{hint}")
             progress(f"予告(残り{m}分): {jp}")
             nxt = mins[idx + 1] if idx + 1 < len(mins) else 0
             gap = (m - nxt) * 60
-            if gap and self._wait_countdown(gap, False, progress) == "empty":
+            if not gap:
+                continue
+            res = self._wait_countdown(gap, cancelable, progress)
+            if res == "cancel":
+                self._pal_broadcast(f"Server {en} cancelled by player")
+                progress(f"プレイヤーがチャットで中止 → {jp}を取り消しました")
+                return False
+            if res == "empty":
                 progress(f"プレイヤー不在を検知 → 待たずに{jp}します")
                 break
         self._pal_broadcast(f"Server {en} now")
         self._palworld_finalize(action, progress)
+        return True
 
     def _pal_broadcast(self, message: str) -> None:
         """Palworldの左上[SYSTEM]チャットへ表示(失敗しても本処理は止めない)。
