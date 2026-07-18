@@ -33,4 +33,4 @@ if (-not (Test-Path "config.yaml")) {
 Write-Host ""
 Write-Host "== 完了 ==" -ForegroundColor Cyan
 Write-Host "1) config.yaml を編集(パスワード等)"
-Write-Host "2) 起動:  $py main.py    (ウィンドウを出さない常駐は pythonw main.py)"
+Write-Host "2) 起動:  $py main_app.py    (ウィンドウを出さない常駐は pythonw main_app.py)"

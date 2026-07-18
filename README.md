@@ -11,7 +11,7 @@ Hyper-V上のVMと、その中で動くゲームサーバー(Minecraft / ARK な
 ## 構成
 
 ```
-main.py          エントリポイント
+main_app.py          エントリポイント
 config.yaml      接続先とサーバープロファイル定義
 core/            コアライブラリ(GUIと将来のWeb版で共通)
   transport.py     ローカルPowerShell / SSH実行
@@ -47,7 +47,7 @@ bash setup.sh
 その後 `config.yaml` の `CHANGE_ME` とIPアドレスを自分の環境に書き換えて起動:
 
 ```
-python main.py           # 常駐(ウィンドウ非表示)は pythonw main.py
+python main_app.py           # 常駐(ウィンドウ非表示)は pythonw main_app.py
 ```
 
 ## セットアップ手順
@@ -100,16 +100,16 @@ python main.py           # 常駐(ウィンドウ非表示)は pythonw main.py
 
 ### 3. 起動
 
-ホスト上で `config.yaml` の `CHANGE_ME` とVMのIPアドレスを記入して `python main.py`。
+ホスト上で `config.yaml` の `CHANGE_ME` とVMのIPアドレスを記入して `python main_app.py`。
 
 ## exe化(任意)
 
 ```
-pyinstaller --onefile --windowed --name GameServerManager main.py
+pyinstaller --onefile --windowed --name GameServerManager main_app.py
 ```
 
 - `config.yaml` はexeと同じフォルダに置く
-  (main.py は自身の場所から config.yaml を探す)。
+  (main_app.py は自身の場所から config.yaml を探す)。
 - `--windowed` 時のコンソールなし環境は考慮済み
   (PowerShell呼び出しは CREATE_NO_WINDOW 指定、エラーはダイアログ表示)。
 
