@@ -475,6 +475,7 @@ class ArkPage(Page):
             return []
         idx = a["index"]
         return [
+            ("✏ 別名を変更", self._rename),
             ("💬 RCONコンソール", self._rcon_console),
             ("⚙ 詳細設定(全マップ共通)", self._settings),
             ("⚡ 動的設定(無停止・色/倍率)", self._dynconfig),
@@ -502,6 +503,25 @@ class ArkPage(Page):
         RconConsole(self.winfo_toplevel(), a["display_name"], self.worker,
                     lambda cmd: self.client.ark_rcon(a["index"], cmd),
                     hints=[("保存", "saveworld"), ("人数", "ListPlayers")])
+
+    def _rename(self):
+        a = self._sel_silent()
+        if not a:
+            return
+        idx, cur = a["index"], a["display_name"]
+        dlg = ctk.CTkInputDialog(
+            text=f"新しい別名を入力してください。\n現在: {cur}",
+            title="ARK 別名を変更")
+        new = (dlg.get_input() or "").strip()
+        if not new or new == cur:
+            return
+
+        def done(res, err):
+            if err:
+                messagebox.showerror("別名を変更", str(err), parent=self)
+            else:
+                self.app.toast(f"別名を「{new}」に変更しました")
+        self.worker.submit(lambda: self.client.ark_rename(idx, new), done)
 
     def _quick(self, idx, action, label):
         # タスクとして実行(📋タスク画面に残る)

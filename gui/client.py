@@ -91,6 +91,9 @@ class Client:
     def ark_quick(self, idx: int, action: str) -> dict:
         return self.post(f"/api/ark/{idx}/quick", {"action": action})
 
+    def ark_rename(self, idx: int, name: str) -> dict:
+        return self.post(f"/api/ark/{idx}/rename", {"name": name})
+
     def ark_rcon(self, idx: int, cmd: str) -> str:
         return self.post(f"/api/ark/{idx}/rcon", {"cmd": cmd}, timeout=30)["response"]
 

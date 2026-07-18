@@ -157,6 +157,21 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         return {"task_id": t.id}
     r.add("POST", r"/api/ark/(?P<idx>\d+)/restart", ark_restart)
 
+    def ark_rename(params, body, **_):
+        ah = _ark(params)
+        idx = int(params["idx"])
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise ApiError(400, "名前が空です")
+        from core import settings
+        try:
+            settings.set_ark_display_name(ctx.config_path, idx, name)
+        except settings.SettingsError as exc:
+            raise ApiError(400, str(exc))
+        ah.cfg.display_name = name          # 稼働中サービスへ即反映(次の監視でGUI更新)
+        return {"ok": True, "display_name": name}
+    r.add("POST", r"/api/ark/(?P<idx>\d+)/rename", ark_rename)
+
     def ark_rcon(params, body, **_):
         ah = _ark(params)
         cmd = (body.get("cmd") or "").strip()
