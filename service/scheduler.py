@@ -289,6 +289,9 @@ class SchedulerService:
                     self.jobs.progress("停止中のため再起動スキップ")
                     out.append("停止中スキップ")
                 else:
+                    # 予約再起動=意図的。マークしてクラッシュ誤検知を防ぐ(完了で🔁通知)
+                    if self.recovery:
+                        self.recovery.mark_restart(f"mc:{job.target}")
                     # cancelable=True: Minecraftはチャット 'no' で中止可(Palworldは読取不可)
                     ok = srv.restart_with_notice(progress=self.jobs.progress,
                                                  cancelable=True)
