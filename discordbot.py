@@ -16,11 +16,12 @@ GSM本体と同じ config.yaml / core を使う。config.yaml に discord セク
   - allowed_servers で bot 操作可能なサーバーを絞れる(既定=全許可)。
   - 稼働中サーバーの停止/再起動は、実行前に確認ボタンを必須にする
     (本番のARK/Palworldをうっかり止めてプレイヤーを切断しないため)。
-  - 操作は stdout に監査ログを出し、log_channel_id 設定時はそこにも記録する。
+  - 操作は logs/discordbot.log に監査ログを出し、log_channel_id 設定時はそこにも記録する。
 """
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from datetime import datetime
@@ -38,7 +39,20 @@ from core.hyperv import HyperVManager
 from core.orchestration import start_server_with_vm
 from core.transport import LocalPowerShell, SSHTransport
 
-CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
+BASE = Path(__file__).resolve().parent
+CONFIG_PATH = BASE / "config.yaml"
+
+# ファイルにログを残す(pythonw/サービス常駐だと標準出力が捨てられるため)。
+# discord.py 自身のログも root ロガー経由でここに集まる(client.run(log_handler=None))。
+_LOG_DIR = BASE / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)-7s] %(name)s: %(message)s",
+    handlers=[logging.FileHandler(_LOG_DIR / "discordbot.log", encoding="utf-8"),
+              logging.StreamHandler()],
+)
+log = logging.getLogger("gsm.bot")
 
 
 def _slug(s: str) -> str:
@@ -216,7 +230,7 @@ async def _audit(interaction: discord.Interaction, label: str, verb: str,
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     mark = "OK" if ok else "NG"
     line = f"[{ts}] [{mark}] {who} → {label} を{verb}" + (f" (失敗: {err})" if err else "")
-    print(line, flush=True)
+    log.info(line)
     if LOG_CHANNEL_ID:
         try:
             ch = client.get_channel(int(LOG_CHANNEL_ID)) \
@@ -225,7 +239,7 @@ async def _audit(interaction: discord.Interaction, label: str, verb: str,
             await ch.send(f"{emoji} `{who}` が **{label}** を{verb}"
                           + (f"（失敗: {err}）" if err else ""))
         except Exception as exc:                               # noqa: BLE001
-            print("ログチャンネル送信に失敗:", exc, flush=True)
+            log.warning("ログチャンネル送信に失敗: %s", exc)
 
 
 class _ConfirmView(discord.ui.View):
@@ -467,21 +481,21 @@ async def on_ready():
             g = discord.Object(id=int(GUILD_ID))
             tree.copy_global_to(guild=g)
             await tree.sync(guild=g)
-            print(f"コマンド同期: guild {GUILD_ID}")
+            log.info("コマンド同期: guild %s", GUILD_ID)
         elif client.guilds:
             # 参加中の各サーバーへ即時同期(グローバル同期は反映が遅いため)
             for g in client.guilds:
                 tree.copy_global_to(guild=g)
                 await tree.sync(guild=g)
-            print(f"コマンド同期: 参加中の {len(client.guilds)} サーバー "
-                  f"({', '.join(g.name for g in client.guilds)})")
+            log.info("コマンド同期: 参加中の %d サーバー (%s)",
+                     len(client.guilds), ", ".join(g.name for g in client.guilds))
         else:
             await tree.sync()
-            print("コマンド同期: グローバル(反映に時間がかかる場合あり)")
+            log.info("コマンド同期: グローバル(反映に時間がかかる場合あり)")
     except Exception as exc:                                   # noqa: BLE001
-        print("コマンド同期に失敗:", exc)
+        log.warning("コマンド同期に失敗: %s", exc)
     allowed = "全許可" if not _ALLOWED else f"{len(TARGETS)}件に限定"
-    print(f"ログイン成功: {client.user}  対象サーバー {len(TARGETS)}件({allowed})")
+    log.info("ログイン成功: %s  対象サーバー %d件(%s)", client.user, len(TARGETS), allowed)
 
 
 def main() -> None:
@@ -489,7 +503,7 @@ def main() -> None:
         raise SystemExit(
             "config.yaml の discord.token が未設定です。"
             "Discord Developer Portal でBotを作ってトークンを設定してください。")
-    client.run(TOKEN)
+    client.run(TOKEN, log_handler=None)   # ロギングは上の basicConfig に集約
 
 
 if __name__ == "__main__":
