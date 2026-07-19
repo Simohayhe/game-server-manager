@@ -113,6 +113,25 @@ pyinstaller --onefile --windowed --name GameServerManager main_app.py
 - `--windowed` 時のコンソールなし環境は考慮済み
   (PowerShell呼び出しは CREATE_NO_WINDOW 指定、エラーはダイアログ表示)。
 
+## Discord ボット(任意)
+
+Discord からゲームサーバーを起動/停止/状態確認できる常駐ボット(`discordbot.py`)。
+アウトバウンド接続のみで動くため、ルーターのポート開放は不要。
+
+```
+python -u discordbot.py    # 常時起動しておく(-u はログを即時出力するため)
+```
+
+- **設定**: `config.yaml` の `discord:` セクション(token/guild_id/admin_role_id/
+  allowed_servers/log_channel_id)。詳細は `config.yaml.example` 参照。
+  bot は Discord Developer Portal で各自作成し、token を設定する。
+- **コマンド**: `/gs list`(一覧) `/gs status` `/gs start` `/gs stop` `/gs restart`
+  (サーバー名はオートコンプリート)。
+- **権限**: `admin_role_id` のロール、未設定なら管理者権限のあるユーザーのみ操作可。
+- **安全設計**: `allowed_servers` で操作可能なサーバーを限定でき(空=全許可)、
+  **稼働中サーバーの停止/再起動は確認ボタンを必須**(プレイヤー切断の誤操作防止)。
+  操作は stdout と(設定時)`log_channel_id` に「誰が何をしたか」を記録する。
+
 ## 今後の拡張候補
 
 - Web版ダッシュボード(coreをそのまま使ってFastAPI + ブラウザUI → スマホ対応)

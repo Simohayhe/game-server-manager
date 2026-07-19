@@ -3,20 +3,27 @@
 GSM本体と同じ config.yaml / core を使う。config.yaml に discord セクションを追加:
 
     discord:
-      token: "BOT_TOKEN"        # Discord Developer Portal で発行
-      guild_id: 123456789       # (任意)このサーバーにコマンドを即時同期
-      admin_role_id: 123456789  # (任意)このロールだけ操作可。未設定なら管理者権限が必要
+      token: "BOT_TOKEN"          # Discord Developer Portal で発行
+      guild_id: 123456789         # (任意)このサーバーにコマンドを即時同期
+      admin_role_id: 123456789    # (任意)このロールだけ操作可。未設定なら管理者権限が必要
+      allowed_servers: []         # (任意)操作を許すサーバーのキー/名前。空=全許可
+      log_channel_id: 123456789   # (任意)操作ログ(誰が何をしたか)を流すチャンネル
 
 実行:  python discordbot.py   (常時起動しておく)
 
-安全設計: 操作は「許可された人が明示的にコマンドを打った時だけ」実行される。
-Palworld/ARK も勝手には動かない(コマンド駆動)。
+安全設計:
+  - 操作は「許可された人が明示的にコマンドを打った時だけ」実行される(コマンド駆動)。
+  - allowed_servers で bot 操作可能なサーバーを絞れる(既定=全許可)。
+  - 稼働中サーバーの停止/再起動は、実行前に確認ボタンを必須にする
+    (本番のARK/Palworldをうっかり止めてプレイヤーを切断しないため)。
+  - 操作は stdout に監査ログを出し、log_channel_id 設定時はそこにも記録する。
 """
 from __future__ import annotations
 
 import asyncio
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 import discord
@@ -120,6 +127,9 @@ _dconf = _raw.get("discord") or {}
 TOKEN = _dconf.get("token")
 GUILD_ID = _dconf.get("guild_id")
 ADMIN_ROLE_ID = _dconf.get("admin_role_id")
+LOG_CHANNEL_ID = _dconf.get("log_channel_id")
+# 操作を許すサーバー(キー or 表示名)。空/未設定なら全許可。
+_ALLOWED = {str(x).strip().lower() for x in (_dconf.get("allowed_servers") or [])}
 
 if cfg.hyperv.mode == "local":
     _runner = LocalPowerShell()
@@ -129,13 +139,22 @@ else:
                            password=cfg.hyperv.password)
 _hyperv = HyperVManager(_runner)
 
+
+def _is_allowed(t) -> bool:
+    if not _ALLOWED:
+        return True
+    return t.key.lower() in _ALLOWED or t.label.lower() in _ALLOWED
+
+
 TARGETS: dict = {}
 for _p in cfg.servers:
     _t = ServerTarget(GameServer(_p), _hyperv)
-    TARGETS[_t.key] = _t
+    if _is_allowed(_t):
+        TARGETS[_t.key] = _t
 for _c in cfg.ark_hosts:
     _t = ArkTarget(ArkHost(_c, _runner))
-    TARGETS[_t.key] = _t
+    if _is_allowed(_t):
+        TARGETS[_t.key] = _t
 
 
 def authorized(interaction: discord.Interaction) -> bool:
@@ -154,6 +173,53 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 
+async def _audit(interaction: discord.Interaction, label: str, verb: str,
+                 ok: bool, err: str = "") -> None:
+    """操作を stdout と(設定時)ログチャンネルに記録する。"""
+    who = getattr(interaction.user, "display_name", str(interaction.user))
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    mark = "OK" if ok else "NG"
+    line = f"[{ts}] [{mark}] {who} → {label} を{verb}" + (f" (失敗: {err})" if err else "")
+    print(line, flush=True)
+    if LOG_CHANNEL_ID:
+        try:
+            ch = client.get_channel(int(LOG_CHANNEL_ID)) \
+                or await client.fetch_channel(int(LOG_CHANNEL_ID))
+            emoji = "✅" if ok else "❌"
+            await ch.send(f"{emoji} `{who}` が **{label}** を{verb}"
+                          + (f"（失敗: {err}）" if err else ""))
+        except Exception as exc:                               # noqa: BLE001
+            print("ログチャンネル送信に失敗:", exc, flush=True)
+
+
+class _ConfirmView(discord.ui.View):
+    """稼働中サーバーの停止/再起動に対する確認ボタン。押した本人のみ有効。"""
+
+    def __init__(self, author_id: int, timeout: float = 30.0):
+        super().__init__(timeout=timeout)
+        self.value: bool | None = None
+        self._author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self._author_id:
+            await interaction.response.send_message(
+                "あなた宛の確認ではありません。", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="実行する", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="キャンセル", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = False
+        self.stop()
+        await interaction.response.defer()
+
+
 async def _target_ac(interaction: discord.Interaction, current: str):
     cur = current.lower()
     out = [app_commands.Choice(name=t.label, value=t.key)
@@ -169,19 +235,55 @@ async def _run_op(interaction: discord.Interaction, key: str, verb: str, method:
     if t is None:
         await interaction.response.send_message("サーバーが見つかりません。", ephemeral=True)
         return
-    await interaction.response.defer(thinking=True)
+
+    running = await asyncio.to_thread(t.is_running)
+
+    # 停止なのに既に止まっている / 再起動なのに止まっている場合の分岐
+    if method == "stop" and not running:
+        await interaction.response.send_message(
+            f"⚪ **{t.label}** は既に停止中です。", ephemeral=True)
+        return
+    if method == "restart" and not running:
+        method, verb = "start", "起動"   # 止まっているものの再起動＝起動
+
+    # 稼働中の停止/再起動は確認ボタンを挟む(プレイヤー切断防止)
+    if method in ("stop", "restart") and running:
+        view = _ConfirmView(interaction.user.id)
+        await interaction.response.send_message(
+            f"⚠️ **{t.label}** は稼働中です。{verb}するとプレイヤーが切断されます。実行しますか?",
+            view=view, ephemeral=True)
+        await view.wait()
+        for c in view.children:
+            c.disabled = True
+        try:
+            await interaction.edit_original_response(view=view)
+        except Exception:                                      # noqa: BLE001
+            pass
+        if not view.value:
+            reason = "タイムアウト" if view.value is None else "キャンセル"
+            await interaction.followup.send(
+                f"↩️ **{t.label}** の{verb}を中止しました（{reason}）。", ephemeral=True)
+            return
+        await interaction.followup.send(f"⏳ **{t.label}** を{verb}しています…")
+    else:
+        await interaction.response.defer(thinking=True)
+
     logs: list[str] = []
     try:
         await asyncio.to_thread(getattr(t, method), logs.append)
     except Exception as exc:                                   # noqa: BLE001
         await interaction.followup.send(f"❌ **{t.label}** の{verb}に失敗: {exc}")
+        await _audit(interaction, t.label, verb, ok=False, err=str(exc))
         return
+
     extra = ""
     if verb in ("起動", "再起動"):
         addr = t.address()
         if addr:
             extra = f"\n接続先: `{addr}`"
-    await interaction.followup.send(f"✅ **{t.label}** を{verb}しました。{extra}")
+    who = getattr(interaction.user, "display_name", "")
+    await interaction.followup.send(f"✅ **{t.label}** を{verb}しました（{who}）。{extra}")
+    await _audit(interaction, t.label, verb, ok=True)
 
 
 gs = app_commands.Group(name="gs", description="ゲームサーバー操作")
@@ -195,7 +297,7 @@ async def gs_list(interaction: discord.Interaction):
         running = await asyncio.to_thread(t.is_running)
         lines.append(f"{'🟢' if running else '⚪'} **{t.label}** — "
                      f"{'稼働中' if running else '停止中'}")
-    await interaction.followup.send("\n".join(lines) or "サーバーがありません。")
+    await interaction.followup.send("\n".join(lines) or "操作可能なサーバーがありません。")
 
 
 @gs.command(name="status", description="サーバーの状態と人数")
@@ -259,7 +361,8 @@ async def on_ready():
             print("コマンド同期: グローバル(反映に時間がかかる場合あり)")
     except Exception as exc:                                   # noqa: BLE001
         print("コマンド同期に失敗:", exc)
-    print(f"ログイン成功: {client.user}  対象サーバー {len(TARGETS)}件")
+    allowed = "全許可" if not _ALLOWED else f"{len(TARGETS)}件に限定"
+    print(f"ログイン成功: {client.user}  対象サーバー {len(TARGETS)}件({allowed})")
 
 
 def main() -> None:
