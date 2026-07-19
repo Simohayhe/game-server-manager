@@ -1,7 +1,9 @@
 """GitHub Releases を見て新しいバージョンがあるか調べる(標準ライブラリのみ)。
 
-現行versionと最新リリースの tag_name を数値列で比較する。リリース未作成や
-取得失敗でも例外は投げず、error に理由を入れて返す(アプリを止めないため)。
+全リリースを取得し、**バージョン番号が最大**のもの(ドラフト/プレリリースは除外)を
+"最新" として現行versionと比較する。GitHubの /releases/latest は「最も新しく作成された
+リリース」を返す仕様で必ずしもバージョン最大ではないため、こちらは自前で最大版を選ぶ。
+リリース未作成や取得失敗でも例外は投げず、error に理由を入れて返す(アプリを止めないため)。
 """
 from __future__ import annotations
 
@@ -10,7 +12,7 @@ import re
 import urllib.error
 import urllib.request
 
-_API = "https://api.github.com/repos/{repo}/releases/latest"
+_API = "https://api.github.com/repos/{repo}/releases?per_page=100"
 
 
 def _ver_tuple(tag: str) -> tuple:
@@ -20,7 +22,7 @@ def _ver_tuple(tag: str) -> tuple:
 
 
 def check_latest(repo: str, current: str, timeout: float = 8.0) -> dict:
-    """最新リリースと current を比較する。
+    """全リリース中のバージョン最大版と current を比較する。
 
     戻り値: {current, latest, update_available, url, error}
       error: None=正常 / "no-release"=リリース未作成 / それ以外=失敗理由
@@ -35,10 +37,18 @@ def check_latest(repo: str, current: str, timeout: float = 8.0) -> dict:
             headers={"User-Agent": "game-server-manager",
                      "Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.load(r)
-        tag = data.get("tag_name") or data.get("name")
+            releases = json.load(r)
+        # ドラフト/プレリリースを除外し、バージョン番号が最大のものを選ぶ
+        cands = [rel for rel in releases
+                 if not rel.get("draft") and not rel.get("prerelease")]
+        if not cands:
+            out["error"] = "no-release"
+            return out
+        newest = max(cands, key=lambda rel: _ver_tuple(
+            rel.get("tag_name") or rel.get("name") or ""))
+        tag = newest.get("tag_name") or newest.get("name")
         out["latest"] = tag
-        out["url"] = data.get("html_url") or out["url"]
+        out["url"] = newest.get("html_url") or out["url"]
         if tag and _ver_tuple(tag) > _ver_tuple(current):
             out["update_available"] = True
     except urllib.error.HTTPError as e:
