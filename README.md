@@ -108,10 +108,21 @@ python main_app.py           # 常駐(ウィンドウ非表示)は pythonw main_
 pyinstaller --onefile --windowed --name GameServerManager main_app.py
 ```
 
-- `config.yaml` はexeと同じフォルダに置く
-  (main_app.py は自身の場所から config.yaml を探す)。
+- exe版のユーザーデータ(`config.yaml`・各種`.json`・初回マーカー)は
+  **`%LOCALAPPDATA%\GameServerManager\`** に保存される(exeの場所に依存しない)。
+  → **exeを入れ替えても設定はそのまま**残り、再セットアップ不要。
+  旧版(exe隣にデータを置く版)からは初回起動時に自動で引っ越す。
 - `--windowed` 時のコンソールなし環境は考慮済み
   (PowerShell呼び出しは CREATE_NO_WINDOW 指定、エラーはダイアログ表示)。
+
+## アップデート
+
+- 起動時に GitHub Releases を確認し、新バージョンがあれば上部バーに
+  `🔔 新バージョン`(クリック)を表示する。
+- exe版はそのまま**アプリ内で更新できる**: クリック → 最新 exe をDL →
+  GSM(GUIとサービス)を終了 → 新 exe に差し替え → 自動再起動。
+  設定・サーバー・予約などは `%LOCALAPPDATA%` にあるため引き継がれる。
+- source実行時は自己更新できないため、クリックでリリースページを開く。
 
 ## Discord ボット(任意)
 

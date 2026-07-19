@@ -22,7 +22,7 @@ from .dashboard import Dashboard
 from .widgets import ACCENT, CARD, ERR, MUTED, OK, TEXT, LogView
 
 DEFAULT_BASE = "http://127.0.0.1:8770"
-APP_VERSION = "3.0.1"                            # リリースtagと比較して更新通知を出す
+APP_VERSION = "3.1.0"                            # リリースtagと比較して更新通知を出す
 GITHUB_REPO = "Simohayhe/game-server-manager"    # アップデート確認先
 UI_SCALES = {"80%": 0.8, "90%": 0.9, "100%": 1.0, "110%": 1.1, "125%": 1.25}
 
@@ -916,8 +916,47 @@ class App(ctk.CTk):
         self.worker.submit(job, done)
 
     def _open_update(self):
-        import webbrowser
-        webbrowser.open(self._update_url)
+        from core import selfupdate
+        # 開発(source)実行では自己更新できないのでリリースページを開く
+        if not selfupdate.is_supported():
+            import webbrowser
+            webbrowser.open(self._update_url)
+            return
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+                "アップデート",
+                "最新版をダウンロードして更新します。\n"
+                "GSM(GUIとサービス)は一度終了し、更新後に自動で再起動します。\n"
+                "設定・サーバー・予約などはそのまま引き継がれます。続行しますか?"):
+            return
+
+        def job():
+            tag, url = selfupdate.latest_exe(GITHUB_REPO)
+            if not url:
+                raise RuntimeError("最新リリースに GameServerManager.exe が見つかりません。")
+            import os
+            import tempfile
+            dest = os.path.join(tempfile.gettempdir(), "GameServerManager.new.exe")
+
+            def prog(got, total):
+                pct = int(got * 100 / total)
+                self.after(0, lambda: self.update_lbl.configure(text=f"⬇ 更新DL {pct}%"))
+            selfupdate.download(url, dest, progress=prog)
+            return dest
+
+        def done(dest, err):
+            if err:
+                self.update_lbl.configure(text="⚠ 更新失敗(クリックで再試行)")
+                from tkinter import messagebox
+                messagebox.showerror("アップデート失敗", str(err))
+                return
+            self.update_lbl.configure(text="更新を適用中… 再起動します")
+            selfupdate.apply_and_restart(dest)
+            import os
+            self.after(600, lambda: os._exit(0))
+
+        self.update_lbl.configure(text="⬇ 更新DL 0%")
+        self.worker.submit(job, done)
 
     def _head(self):
         h = ctk.CTkFrame(self, fg_color=SIDE, corner_radius=0, height=48)
