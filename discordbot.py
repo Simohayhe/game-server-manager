@@ -30,6 +30,7 @@ import discord
 import yaml
 from discord import app_commands
 
+import botperms
 from core.arkhost import ArkHost
 from core.config import load_config
 from core.gameserver import GameServer
@@ -55,6 +56,7 @@ class ServerTarget:
         self.hyperv = hyperv
         self.key = gs.profile.name
         self.label = gs.profile.display_name
+        self.group = getattr(gs.profile, "game", None) or "other"   # 権限グループ
 
     def is_running(self) -> bool:
         return self.gs.status() == "active"
@@ -94,6 +96,7 @@ class ArkTarget:
         self.ah = ah
         self.key = _slug(ah.cfg.display_name)   # 例: ark-the-island
         self.label = ah.cfg.display_name
+        self.group = "ark"                      # 権限グループ
 
     def is_running(self) -> bool:
         return self.ah.is_running()
@@ -157,12 +160,45 @@ for _c in cfg.ark_hosts:
         TARGETS[_t.key] = _t
 
 
-def authorized(interaction: discord.Interaction) -> bool:
+def is_bot_admin(interaction: discord.Interaction) -> bool:
+    """「管理者」ロール(admin_role_id)保持者。未設定ならDiscordの管理者権限者。
+    ボット管理者は全サーバー操作＋権限管理(/permission)ができる。"""
     if ADMIN_ROLE_ID:
         roles = getattr(interaction.user, "roles", [])
         return any(getattr(r, "id", None) == int(ADMIN_ROLE_ID) for r in roles)
     perms = getattr(interaction.user, "guild_permissions", None)
     return bool(perms and perms.administrator)
+
+
+def target_scopes(t) -> set[str]:
+    """対象サーバーに当たる権限スコープ(all / ゲーム / 個別キー)。"""
+    return {"all", t.group, t.key}
+
+
+def can_operate(interaction: discord.Interaction, t) -> bool:
+    """ボット管理者、または当該サーバーに当たる権限を持つ人なら操作可。"""
+    if is_bot_admin(interaction):
+        return True
+    return botperms.allows(botperms.grants(interaction.user.id), target_scopes(t))
+
+
+def valid_scopes() -> list[str]:
+    """付与できる権限スコープ一覧(all + 存在するゲーム + 個別サーバーキー)。
+    キーがゲーム名と同名(例: minecraft)の場合はグループ側に寄せて重複を除く。"""
+    groups = sorted({t.group for t in TARGETS.values()})
+    keys = [k for k in sorted(TARGETS.keys()) if k not in groups]
+    return ["all"] + groups + keys
+
+
+def _scope_label(s: str) -> str:
+    """オートコンプリート表示用のラベル(スコープが何を指すか分かるように)。"""
+    if s == "all":
+        return "all — 全サーバー"
+    groups = {t.group for t in TARGETS.values()}
+    if s in groups:
+        return f"{s} — {s} 全体"
+    t = TARGETS.get(s)
+    return f"{s} — {t.label}" if t else s
 
 
 # ---------------------------------------------------------------------------
@@ -228,12 +264,13 @@ async def _target_ac(interaction: discord.Interaction, current: str):
 
 
 async def _run_op(interaction: discord.Interaction, key: str, verb: str, method: str):
-    if not authorized(interaction):
-        await interaction.response.send_message("⛔ 権限がありません。", ephemeral=True)
-        return
     t = TARGETS.get(key)
     if t is None:
         await interaction.response.send_message("サーバーが見つかりません。", ephemeral=True)
+        return
+    if not can_operate(interaction, t):
+        await interaction.response.send_message(
+            f"⛔ **{t.label}** を操作する権限がありません。", ephemeral=True)
         return
 
     running = await asyncio.to_thread(t.is_running)
@@ -339,6 +376,88 @@ async def gs_restart(interaction: discord.Interaction, server: str):
 
 
 tree.add_command(gs)
+
+
+# ---------------------------------------------------------------------------
+# /permission — 操作権限の付与/剥奪(ボット管理者のみ)
+# ---------------------------------------------------------------------------
+perm = app_commands.Group(name="permission", description="操作権限の管理(管理者のみ)")
+
+
+async def _scope_ac(interaction: discord.Interaction, current: str):
+    cur = current.lower()
+    return [app_commands.Choice(name=_scope_label(s), value=s)
+            for s in valid_scopes() if cur in s.lower()][:25]
+
+
+def _scope_hint() -> str:
+    return "有効な権限: " + ", ".join(f"`{s}`" for s in valid_scopes())
+
+
+@perm.command(name="add", description="ユーザーに操作権限を付与する")
+@app_commands.describe(user="対象ユーザー", permission="付与する権限(all/ゲーム/個別サーバー)")
+@app_commands.autocomplete(permission=_scope_ac)
+async def perm_add(interaction: discord.Interaction, user: discord.Member, permission: str):
+    if not is_bot_admin(interaction):
+        await interaction.response.send_message("⛔ 権限管理は管理者のみです。", ephemeral=True)
+        return
+    if permission not in valid_scopes():
+        await interaction.response.send_message(
+            f"❓ 不明な権限 `{permission}`。\n{_scope_hint()}", ephemeral=True)
+        return
+    added = await asyncio.to_thread(botperms.add, user.id, permission)
+    head = "✅ 付与しました" if added else "ℹ️ 既に持っています"
+    await interaction.response.send_message(
+        f"{head}: {user.mention} → `{permission}`")
+    if added:
+        await _audit(interaction, f"{user.display_name} の権限",
+                     f"`{permission}` を付与", ok=True)
+
+
+@perm.command(name="remove", description="ユーザーから操作権限を剥奪する")
+@app_commands.describe(user="対象ユーザー", permission="剥奪する権限")
+@app_commands.autocomplete(permission=_scope_ac)
+async def perm_remove(interaction: discord.Interaction, user: discord.Member, permission: str):
+    if not is_bot_admin(interaction):
+        await interaction.response.send_message("⛔ 権限管理は管理者のみです。", ephemeral=True)
+        return
+    removed = await asyncio.to_thread(botperms.remove, user.id, permission)
+    if removed:
+        await interaction.response.send_message(
+            f"🗑️ 剥奪しました: {user.mention} → `{permission}`")
+        await _audit(interaction, f"{user.display_name} の権限",
+                     f"`{permission}` を剥奪", ok=True)
+    else:
+        await interaction.response.send_message(
+            f"ℹ️ {user.mention} は `{permission}` を持っていません。", ephemeral=True)
+
+
+@perm.command(name="list", description="付与済みの操作権限を一覧表示する")
+@app_commands.describe(user="(任意)特定ユーザーだけ表示")
+async def perm_list(interaction: discord.Interaction, user: discord.Member = None):
+    if not is_bot_admin(interaction):
+        await interaction.response.send_message("⛔ 権限管理は管理者のみです。", ephemeral=True)
+        return
+    users = botperms.load().get("users", {})
+    if user is not None:
+        g = sorted(users.get(str(user.id), []))
+        body = ", ".join(f"`{s}`" for s in g) if g else "(個別権限なし)"
+        await interaction.response.send_message(f"{user.mention}: {body}", ephemeral=True)
+        return
+    if not users:
+        await interaction.response.send_message(
+            "まだ誰にも個別権限は付与されていません。"
+            "（「管理者」ロール保持者は常に全操作可）", ephemeral=True)
+        return
+    lines = []
+    for uid, scopes in users.items():
+        m = interaction.guild.get_member(int(uid)) if interaction.guild else None
+        name = m.display_name if m else f"user:{uid}"
+        lines.append(f"**{name}** — " + ", ".join(f"`{s}`" for s in sorted(scopes)))
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+tree.add_command(perm)
 
 
 @client.event

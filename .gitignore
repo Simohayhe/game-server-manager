@@ -10,6 +10,8 @@ portsync.json
 schedules.json
 dynconfig.json
 arkbehavior.json
+permissions.json
+permissions.json.tmp
 dynamicconfig.ini
 .gsm_firstrun_done
 
