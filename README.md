@@ -102,26 +102,28 @@ python main_app.py           # 常駐(ウィンドウ非表示)は pythonw main_
 
 ホスト上で `config.yaml` の `CHANGE_ME` とVMのIPアドレスを記入して `python main_app.py`。
 
-## exe化(任意)
+## インストール / 配布
 
-```
-pyinstaller --onefile --windowed --name GameServerManager main_app.py
-```
-
-- exe版のユーザーデータ(`config.yaml`・各種`.json`・初回マーカー)は
-  **`%LOCALAPPDATA%\GameServerManager\`** に保存される(exeの場所に依存しない)。
-  → **exeを入れ替えても設定はそのまま**残り、再セットアップ不要。
-  旧版(exe隣にデータを置く版)からは初回起動時に自動で引っ越す。
-- `--windowed` 時のコンソールなし環境は考慮済み
-  (PowerShell呼び出しは CREATE_NO_WINDOW 指定、エラーはダイアログ表示)。
+- **通常のユーザーは `GameServerManager-Setup.exe`(インストーラ)を実行**する。
+  `C:\Program Files\GameServerManager\` に本体を入れ、**デスクトップ＋スタートメニュー**に
+  ショートカットを作成し、アンインストーラも登録する(インストール時に UAC)。
+- ユーザーデータ(`config.yaml`・各種`.json`・初回マーカー)は本体とは別に
+  **`%LOCALAPPDATA%\GameServerManager\`** に保存される(書込可・exeの場所に依存しない)。
+  → **更新で本体を入れ替えても設定はそのまま**残る。旧版(exe隣にデータを置く版)からは
+  初回起動時に自動で引っ越す。
+- インストーラは Inno Setup (`installer.iss`) でビルドする:
+  `ISCC.exe /DMyAppVersion=X.Y.Z installer.iss` → `installer_out\GameServerManager-Setup.exe`。
+  CI(タグ push)が exe とインストーラの両方をリリースに添付する。
+- 単体 exe だけ作るなら:
+  `pyinstaller --onefile --windowed --name GameServerManager main_app.py`。
 
 ## アップデート
 
 - 起動時に GitHub Releases を確認し、新バージョンがあれば上部バーに
   `🔔 新バージョン`(クリック)を表示する。
-- exe版はそのまま**アプリ内で更新できる**: クリック → 最新 exe をDL →
-  GSM(GUIとサービス)を終了 → 新 exe に差し替え → 自動再起動。
-  設定・サーバー・予約などは `%LOCALAPPDATA%` にあるため引き継がれる。
+- クリックで**アプリ内更新**: 最新の `Setup.exe` をDL → 実行(UAC昇格して GSM を停止 →
+  上書きインストール → 再起動)。設定は `%LOCALAPPDATA%` にあるため引き継がれる。
+  インストーラが無いリリースでは exe を直接入れ替える方式にフォールバック。
 - source実行時は自己更新できないため、クリックでリリースページを開く。
 
 ## Discord ボット(任意)

@@ -13,6 +13,7 @@ arkbehavior.json
 permissions.json
 permissions.json.tmp
 logs/
+installer_out/
 dynamicconfig.ini
 .gsm_firstrun_done
 

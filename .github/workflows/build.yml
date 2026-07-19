@@ -34,12 +34,22 @@ jobs:
             --collect-submodules paramiko --collect-submodules core --collect-submodules service --collect-submodules gui `
             --add-data "provisioners;provisioners" main_app.py
 
+      - name: インストーラ作成(Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $ref = "${{ github.ref_name }}"
+          if ($ref -match '^v(.+)$') { $ver = $Matches[1] } else { $ver = '0.0.0-dev' }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$ver" installer.iss
+
       - name: 成果物をアップロード(検証用)
         id: upload
         uses: actions/upload-artifact@v4
         with:
           name: GameServerManager
-          path: dist/GameServerManager.exe
+          path: |
+            dist/GameServerManager.exe
+            installer_out/GameServerManager-Setup.exe
 
       # ↓ SignPath 承認後に有効化: dist の exe を署名して signed/ に受け取る
       # - name: SignPath 署名
@@ -58,4 +68,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/GameServerManager.exe
+          files: |
+            dist/GameServerManager.exe
+            installer_out/GameServerManager-Setup.exe

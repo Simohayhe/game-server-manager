@@ -23,6 +23,7 @@ from core.updatecheck import _ver_tuple
 
 _API = "https://api.github.com/repos/{repo}/releases?per_page=100"
 ASSET_NAME = "GameServerManager.exe"
+INSTALLER_NAME = "GameServerManager-Setup.exe"
 
 
 def is_supported() -> bool:
@@ -45,9 +46,15 @@ def _newest_release(repo: str, timeout: float = 8.0) -> dict | None:
         x.get("tag_name") or x.get("name") or ""))
 
 
+def _asset_url(rel: dict, name: str) -> str | None:
+    for a in rel.get("assets", []):
+        if a.get("name") == name:
+            return a.get("browser_download_url")
+    return None
+
+
 def latest_exe(repo: str, timeout: float = 8.0) -> tuple[str | None, str | None]:
-    """(tag, download_url) を返す。
-    exe資産が無ければ (tag, None)、リリース未作成/失敗は (None, None)。"""
+    """(tag, exe_url) を返す。exe資産が無ければ (tag, None)、失敗は (None, None)。"""
     try:
         rel = _newest_release(repo, timeout)
     except (urllib.error.URLError, OSError, ValueError):
@@ -55,12 +62,20 @@ def latest_exe(repo: str, timeout: float = 8.0) -> tuple[str | None, str | None]
     if not rel:
         return (None, None)
     tag = rel.get("tag_name") or rel.get("name")
-    url = None
-    for a in rel.get("assets", []):
-        if a.get("name") == ASSET_NAME:
-            url = a.get("browser_download_url")
-            break
-    return (tag, url)
+    return (tag, _asset_url(rel, ASSET_NAME))
+
+
+def latest_installer(repo: str, timeout: float = 8.0) -> tuple[str | None, str | None]:
+    """(tag, installer_url) を返す。Setup.exe 資産があればその URL。
+    無ければ (tag, None)、リリース未作成/失敗は (None, None)。"""
+    try:
+        rel = _newest_release(repo, timeout)
+    except (urllib.error.URLError, OSError, ValueError):
+        return (None, None)
+    if not rel:
+        return (None, None)
+    tag = rel.get("tag_name") or rel.get("name")
+    return (tag, _asset_url(rel, INSTALLER_NAME))
 
 
 def download(url: str, dest: Path, progress=None, timeout: float = 120.0) -> Path:
@@ -80,6 +95,21 @@ def download(url: str, dest: Path, progress=None, timeout: float = 120.0) -> Pat
                 if progress and total:
                     progress(got, total)
     return dest
+
+
+def run_installer(setup_exe: Path) -> None:
+    """DL済みの Setup.exe を起動して更新させる。呼び出し後、本体は速やかに終了すること。
+
+    Setup.exe(Inno Setup)は管理者マニフェスト付き=起動時にUAC昇格し、稼働中のGSMを停止して
+    Program Files 等へ上書きインストール、完了後にGSMを再起動する。Program Files 方式でも
+    昇格の面倒を Setup.exe に丸投げできるので、exe直接入替より確実。
+    /SILENT で進捗バーのみ表示(ウィザードのクリック不要)。
+    """
+    setup_exe = Path(setup_exe).resolve()
+    DETACHED_PROCESS = 0x00000008
+    subprocess.Popen(
+        [str(setup_exe), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+        creationflags=DETACHED_PROCESS, close_fds=True)
 
 
 def _ps_quote(p: Path) -> str:

@@ -22,7 +22,7 @@ from .dashboard import Dashboard
 from .widgets import ACCENT, CARD, ERR, MUTED, OK, TEXT, LogView
 
 DEFAULT_BASE = "http://127.0.0.1:8770"
-APP_VERSION = "3.1.0"                            # リリースtagと比較して更新通知を出す
+APP_VERSION = "3.1.1"                            # リリースtagと比較して更新通知を出す
 GITHUB_REPO = "Simohayhe/game-server-manager"    # アップデート確認先
 UI_SCALES = {"80%": 0.8, "90%": 0.9, "100%": 1.0, "110%": 1.1, "125%": 1.25}
 
@@ -931,29 +931,41 @@ class App(ctk.CTk):
             return
 
         def job():
-            tag, url = selfupdate.latest_exe(GITHUB_REPO)
-            if not url:
-                raise RuntimeError("最新リリースに GameServerManager.exe が見つかりません。")
             import os
             import tempfile
-            dest = os.path.join(tempfile.gettempdir(), "GameServerManager.new.exe")
 
             def prog(got, total):
                 pct = int(got * 100 / total)
                 self.after(0, lambda: self.update_lbl.configure(text=f"⬇ 更新DL {pct}%"))
-            selfupdate.download(url, dest, progress=prog)
-            return dest
 
-        def done(dest, err):
+            # インストーラ(Setup.exe)があればそちらを優先(昇格/入替/再起動を丸ごと任せる)
+            tag, url = selfupdate.latest_installer(GITHUB_REPO)
+            if url:
+                dest = os.path.join(tempfile.gettempdir(), "GameServerManager-Setup.exe")
+                selfupdate.download(url, dest, progress=prog)
+                return ("installer", dest)
+            # 無ければ exe 直接入替にフォールバック
+            tag, url = selfupdate.latest_exe(GITHUB_REPO)
+            if not url:
+                raise RuntimeError("最新リリースに更新用ファイルが見つかりません。")
+            dest = os.path.join(tempfile.gettempdir(), "GameServerManager.new.exe")
+            selfupdate.download(url, dest, progress=prog)
+            return ("exe", dest)
+
+        def done(res, err):
             if err:
                 self.update_lbl.configure(text="⚠ 更新失敗(クリックで再試行)")
                 from tkinter import messagebox
                 messagebox.showerror("アップデート失敗", str(err))
                 return
+            kind, dest = res
             self.update_lbl.configure(text="更新を適用中… 再起動します")
-            selfupdate.apply_and_restart(dest)
+            if kind == "installer":
+                selfupdate.run_installer(dest)
+            else:
+                selfupdate.apply_and_restart(dest)
             import os
-            self.after(600, lambda: os._exit(0))
+            self.after(800, lambda: os._exit(0))
 
         self.update_lbl.configure(text="⬇ 更新DL 0%")
         self.worker.submit(job, done)
