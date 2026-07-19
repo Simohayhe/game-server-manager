@@ -16,7 +16,7 @@ from core.orchestration import start_server_with_vm
 from core.paths import app_dir
 
 CRASHWATCH_PATH = app_dir() / "crashwatch.json"
-MARK_WINDOW_SEC = 300        # 意図的操作とみなす時間窓
+MARK_WINDOW_SEC = 1200       # 意図的操作とみなす時間窓(予告カウントダウン最大15分+起動を包含)
 COOLDOWN_SEC = 120           # 復旧の連打防止
 
 
@@ -65,7 +65,9 @@ class RecoveryService:
         『起動しました』通知はプロセス起動時ではなくここで出す。ARKはプロセスが
         立ち上がってから実際に参加可能になるまで数十秒あり、早すぎる通知は誤解を招くため。
         """
-        if not self._recent(self._restart_marks, key):
+        if self._recent(self._restart_marks, key):
+            self._notify("restart", f"🔁 {display} を再起動しました", game)
+        else:
             self._notify("server_up", f"🟢 {display} が起動しました", game)
 
     def on_change(self, key: str, kind: str, display: str, running: bool, ref,
