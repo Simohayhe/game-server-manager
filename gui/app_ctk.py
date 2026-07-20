@@ -991,7 +991,12 @@ class App(ctk.CTk):
                      font=ctk.CTkFont(size=10)).pack(side="left")
         self.svc = ctk.CTkLabel(h, text="接続確認中…", text_color=MUTED,
                                 font=ctk.CTkFont(size=11))
-        self.svc.pack(side="right", padx=14)
+        self.svc.pack(side="right", padx=(4, 14))
+        # 裏方サービスを再起動(コード更新の反映など)。ゲーム本体には影響しない。
+        ctk.CTkButton(h, text="🔄 サービス再起動", width=118, height=28, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      font=ctk.CTkFont(size=11),
+                      command=self._restart_service).pack(side="right", padx=(0, 4))
         # 新バージョン通知(見つかった時だけ表示・クリックでリリース页へ)
         self._update_url = f"https://github.com/{GITHUB_REPO}/releases"
         self.update_lbl = ctk.CTkLabel(h, text="", text_color="#ffc27a", cursor="hand2",
@@ -1075,6 +1080,32 @@ class App(ctk.CTk):
     def toast(self, text: str) -> None:
         self.toast_lb.configure(text=text)
         self.after(4000, lambda: self.toast_lb.configure(text=""))
+
+    def _restart_service(self) -> None:
+        """裏方サービスを再起動する(git pull後のコード反映など)。"""
+        if not messagebox.askyesno(
+                "サービス再起動",
+                "裏方サービス(監視・予約・API)を再起動します。\n"
+                "コード更新の反映などに使います。ゲームサーバー本体には影響しません。\n"
+                "数秒で戻ります。続行しますか?", icon="warning", default="no"):
+            return
+        self.svc.configure(text="🔄 サービス再起動中…", text_color=MUTED)
+
+        def job():
+            import main_app
+            return main_app.restart_service()
+
+        def done(ok, err):
+            if err:
+                messagebox.showerror("サービス再起動", str(err))
+            elif ok:
+                self.toast("サービスを再起動しました")
+                self._health()
+            else:
+                messagebox.showwarning(
+                    "サービス再起動",
+                    "サービスが立ち上がりませんでした。少し待って再度お試しください。")
+        self.worker.submit(job, done)
 
     def _health(self):
         def done(r, err):

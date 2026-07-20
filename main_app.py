@@ -48,6 +48,41 @@ def _spawn_service() -> None:
     subprocess.Popen(cmd, cwd=str(BASE), creationflags=flags, close_fds=True)
 
 
+def _kill_service() -> None:
+    """稼働中の裏方サービス(--service プロセス)だけを止める。
+
+    GUI本体は --service を付けずに起動しているので巻き込まない。
+    """
+    if os.name != "nt":
+        subprocess.run(["pkill", "-f", "main_app.py --service"], check=False)
+        return
+    ps = ("Get-CimInstance Win32_Process | Where-Object { "
+          "$_.CommandLine -match '--service' -and ($_.Name -eq 'python.exe' -or "
+          "$_.Name -eq 'pythonw.exe' -or $_.Name -eq 'GameServerManager.exe') } | "
+          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                   creationflags=0x08000000, check=False)
+
+
+def restart_service(timeout: float = 25.0) -> bool:
+    """裏方サービスを止めて起動し直す(コード更新の反映など)。復帰でTrue。
+
+    ゲームサーバー本体(ARK/MC/Palworld)には影響しない。GUIから呼ぶ想定。
+    """
+    _kill_service()
+    for _ in range(20):                       # ポート(8770)が空くのを待つ
+        if not _service_alive():
+            break
+        time.sleep(0.3)
+    _spawn_service()
+    end = time.time() + timeout
+    while time.time() < end:
+        if _service_alive():
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def _run_service() -> int:
     from main_service import build_service
     try:
