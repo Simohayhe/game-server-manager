@@ -253,7 +253,7 @@ class PlayerRestoreDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             self, text="① 復元したい時点(バックアップ)を選ぶ → ② 戻したいプレイヤーを選ぶ → 復元。"
             "\n復元は現在のデータを上書きします(実行前に自動で安全バックアップを取ります)。"
-            "対象マップが稼働中だと停止を促されます。",
+            "マップ停止は不要ですが、対象プレイヤーは復元中オフラインにしてください。",
             text_color=MUTED, anchor="w", justify="left",
             font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14)
 
@@ -401,6 +401,134 @@ class PlayerRestoreDialog(ctk.CTkToplevel):
                                 parent=self)
             return
         self._do_restore(None, "この時点の全プレイヤー")
+
+
+class PlayerCommandDialog(ctk.CTkToplevel):
+    """ARK: 接続中プレイヤーに管理コマンドを1クリックで当てる。
+
+    コマンドを選ぶ → プレイヤーを選ぶ → 実行。クリエイティブは**トグル**なので、
+    同じ操作で「付与」も「戻し(解除)」もできる(ON→OFF)。
+    ※ ASAのRCONは god/fly 単体を他人に付与できないため、飛行+無敵+無限資源を束ねた
+      クリエイティブモード(GiveCreativeModeToPlayer)を使う。
+    """
+
+    # (ラベル, コマンド雛形{id}, 確認が要るか)
+    COMMANDS = [
+        ("🪄 クリエイティブ 切替 (飛行＋無敵＋無限資源) ※もう一度で解除",
+         "GiveCreativeModeToPlayer {id}", False),
+        ("⭐ 経験値 +10000", "GiveExpToPlayer {id} 10000 0 1", False),
+        ("💥 キル (その場で死亡)", "KillPlayer {id}", True),
+    ]
+
+    def __init__(self, master, worker, map_name: str, list_fn, run_fn):
+        super().__init__(master)
+        self.title(f"プレイヤーにコマンド — {map_name}")
+        self.geometry("560x460")
+        self.configure(fg_color="#0f1115")
+        self.worker = worker
+        self.list_fn = list_fn        # () -> ListPlayers 生文字列
+        self.run_fn = run_fn          # (cmd) -> 応答
+        self._players: list[tuple[str, str]] = []
+
+        ctk.CTkLabel(self, text=f"🎮 プレイヤーにコマンド — {map_name}", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(
+            anchor="w", padx=14, pady=(12, 2))
+        ctk.CTkLabel(
+            self, text="① コマンドを選ぶ → ② 接続中プレイヤーを選ぶ → 実行。"
+            "\nクリエイティブは切替(トグル)なので、同じ操作で解除(戻し)もできます。",
+            text_color=MUTED, anchor="w", justify="left",
+            font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14)
+
+        ctk.CTkLabel(self, text="コマンド", text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(8, 0))
+        self._cmd_labels = [c[0] for c in self.COMMANDS]
+        self.cmd_menu = ctk.CTkOptionMenu(self, values=self._cmd_labels, width=520,
+                                          fg_color="#2b303a", button_color="#39404d",
+                                          button_hover_color="#4a515e")
+        self.cmd_menu.set(self._cmd_labels[0])
+        self.cmd_menu.pack(anchor="w", padx=14, pady=(2, 6))
+
+        wrap = ctk.CTkFrame(self, fg_color=CARD, corner_radius=8)
+        wrap.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        ctk.CTkLabel(wrap, text="接続中プレイヤー", text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=(6, 0))
+        self.tree = ttk.Treeview(wrap, columns=("id",), show="tree headings",
+                                 height=10, selectmode="browse", style="D.Treeview")
+        self.tree.heading("#0", text="名前")
+        self.tree.column("#0", width=220)
+        self.tree.heading("id", text="ID")
+        self.tree.column("id", width=290)
+        self.tree.pack(fill="both", expand=True, side="left", padx=(6, 0), pady=6)
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview,
+                           style="D.Vertical.TScrollbar")
+        sb.pack(side="right", fill="y", pady=6, padx=(0, 6))
+        self.tree.configure(yscrollcommand=sb.set)
+
+        self.status = ctk.CTkLabel(self, text="", text_color=MUTED,
+                                   font=ctk.CTkFont(size=11))
+        self.status.pack(anchor="w", padx=14)
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=12, pady=(2, 12))
+        ctk.CTkButton(bar, text="実行", height=32, corner_radius=6, fg_color=ACCENT,
+                      hover_color="#4a86e0", command=self._run).pack(side="left")
+        ctk.CTkButton(bar, text="プレイヤー再読込", height=32, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self._load).pack(side="right")
+        self.after(120, self.lift)
+        self._load()
+
+    @staticmethod
+    def _parse(raw: str):
+        import re
+        out = []
+        for line in (raw or "").splitlines():
+            m = re.match(r"\s*\d+\.\s*(.+?),\s*([0-9A-Za-z]{12,})\s*$", line)
+            if m:
+                out.append((m.group(1).strip(), m.group(2).strip()))
+        return out
+
+    def _load(self):
+        self.status.configure(text="接続中プレイヤーを取得中…")
+
+        def done(raw, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.status.configure(text=f"取得に失敗: {err}")
+                return
+            self._players = self._parse(raw)
+            self.tree.delete(*self.tree.get_children())
+            for i, (name, pid) in enumerate(self._players):
+                self.tree.insert("", "end", iid=str(i), text=name, values=(pid,))
+            self.status.configure(
+                text=(f"{len(self._players)}人 接続中。対象を選んで実行。"
+                      if self._players else
+                      "接続中のプレイヤーがいません(コマンドは接続中の人に当てます)。"))
+        self.worker.submit(self.list_fn, done)
+
+    def _run(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("選択なし", "対象プレイヤーを選んでください", parent=self)
+            return
+        name, pid = self._players[int(sel[0])]
+        label, tmpl, confirm = self.COMMANDS[self._cmd_labels.index(self.cmd_menu.get())]
+        if confirm and not messagebox.askyesno(
+                "確認", f"{name} に「{label}」を実行します。よろしいですか?",
+                icon="warning", default="no", parent=self):
+            return
+        cmd = tmpl.format(id=pid)
+        self.status.configure(text=f"実行中: {cmd}")
+
+        def done(resp, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.status.configure(text=f"失敗: {err}")
+                messagebox.showerror("コマンド", str(err), parent=self)
+            else:
+                self.status.configure(text=f"✅ {name} に実行: {label}  応答: {(resp or '').strip()[:60]}")
+        self.worker.submit(lambda: self.run_fn(cmd), done)
 
 
 class PropsEditor(ctk.CTkToplevel):

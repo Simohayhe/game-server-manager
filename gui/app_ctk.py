@@ -469,6 +469,15 @@ class ArkPage(Page):
     def _pbk(self):
         self.act(self.client.ark_players_backup, "プレイヤーデータBK")
 
+    def _player_cmd(self, idx):
+        a = self._sel_silent()
+        name = a["display_name"] if a else "ARK"
+        from .dialogs import PlayerCommandDialog
+        PlayerCommandDialog(
+            self.winfo_toplevel(), self.worker, name,
+            list_fn=lambda: self.client.ark_rcon(idx, "ListPlayers"),
+            run_fn=lambda cmd: self.client.ark_rcon(idx, cmd))
+
     def _prestore(self):
         from .dialogs import PlayerRestoreDialog
         PlayerRestoreDialog(
@@ -485,6 +494,7 @@ class ArkPage(Page):
         idx = a["index"]
         return [
             ("✏ 別名を変更", self._rename),
+            ("🎮 プレイヤーにコマンド(飛行/無敵ほか)", lambda: self._player_cmd(idx)),
             ("💬 RCONコンソール", self._rcon_console),
             ("⚙ 詳細設定(全マップ共通)", self._settings),
             ("⚡ 動的設定(無停止・色/倍率)", self._dynconfig),

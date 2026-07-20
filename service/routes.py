@@ -461,24 +461,44 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
     def ark_players_restore(body, **_):
         """プレイヤーデータを復元する。body: {file, entries:[...]|null, safety:true}。
 
-        entries=null で全体復元。復元対象マップが稼働中なら 409(停止を促す)。
+        entries=null で全体復元。**マップ停止は不要** — 復元するプロファイルは、その本人が
+        オフラインなら稼働中でも安全に差し替えできる(本人が入り直せば反映)。ただし対象プレイヤーが
+        今まさに接続中だと saveworld で上書きされ得るので、その場合だけ 409(ログアウトを促す)。
         復元前に現在の状態を安全BKする(既定)。
         """
+        import re as _re
         f = (body or {}).get("file")
         entries = (body or {}).get("entries")          # None=全体
         if not f:
             raise ApiError(400, "復元するBK(file)を指定してください")
         label_to_root = {a.cfg.map_label: str(backup.ark_saved_dir(a.cfg.config_dir))
                          for a in ctx.arkhosts}
-        # 対象マップの稼働チェック(プロファイルはマップ停止中に戻すのが確実)
-        if entries is None:
-            involved = set(label_to_root)
+        # 復元対象のプレイヤーID(ファイル名=EOS ID)。entries=None は全員が対象。
+        target_ids = None
+        if entries is not None:
+            target_ids = {e.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                          for e in entries if e.endswith(".arkprofile")}
+        # 稼働中マップの接続中プレイヤーIDを集める(ListPlayersの32桁hex)
+        online = {}     # id -> map display
+        for a in ctx.arkhosts:
+            if not a.is_running():
+                continue
+            try:
+                raw = a.players() or ""
+            except Exception:                          # noqa: BLE001
+                raw = ""
+            for m in _re.finditer(r"([0-9a-fA-F]{32})", raw):
+                online[m.group(1).lower()] = a.cfg.display_name
+        if target_ids is None:
+            if online:
+                who = "、".join(sorted(set(online.values())))
+                raise ApiError(409, f"接続中のプレイヤーがいます({who})。"
+                               "全体復元は全員ログアウト後に行ってください。")
         else:
-            involved = {e.split("/", 1)[0] for e in entries}
-        running = [a.cfg.display_name for a in ctx.arkhosts
-                   if a.cfg.map_label in involved and a.is_running()]
-        if running:
-            raise ApiError(409, "復元前に停止してください: " + "、".join(running))
+            conflict = [pid for pid in target_ids if pid.lower() in online]
+            if conflict:
+                raise ApiError(409, "復元対象のプレイヤーが接続中です。"
+                               "本人がログアウトしてから復元してください(マップ停止は不要)。")
         cluster = ctx.ark_cluster_dir()
         safety = (body or {}).get("safety", True)
 
