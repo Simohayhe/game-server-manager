@@ -65,7 +65,8 @@ dns:
 # ==== バックアップ ====
 backup:
   path: 'C:\GameBackups'
-  keep: 10
+  keep: 10                 # ワールド等(大容量)の世代数
+  players_keep: 60         # プレイヤーデータ(極小)専用の世代数。10分毎の予約なら約10時間ぶん
   compress: true
 
 # ==== CurseForge APIキー(任意・mod検索/導入で使用) ====

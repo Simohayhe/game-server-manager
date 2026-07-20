@@ -247,6 +247,7 @@ def load_config(path: str | Path) -> AppConfig:
             path=bk_raw.get("path", r"C:\GameBackups"),
             keep=int(bk_raw.get("keep", 10)),
             compress=bool(bk_raw.get("compress", True)),
+            players_keep=int(bk_raw.get("players_keep", 60)),
         )
 
     cf_raw = raw.get("curseforge") or {}

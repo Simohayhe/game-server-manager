@@ -20,8 +20,9 @@ import paramiko
 @dataclass
 class BackupConfig:
     path: str = r"C:\GameBackups"
-    keep: int = 10
+    keep: int = 10               # ワールド等(大容量)の世代数
     compress: bool = True
+    players_keep: int = 60       # プレイヤーデータ(極小)の世代数。keepとは別に多く残す
 
 
 class BackupError(Exception):
@@ -154,7 +155,9 @@ def ark_player_backup(entries, cluster_dir: str | Path | None, cfg: BackupConfig
                         n += 1
                     except (OSError, ValueError):
                         pass
-    _prune(d, "players", cfg.keep if keep is None else keep, progress)
+    # プレイヤーBKは専用の保持数(players_keep)で剪定する。ワールド用の keep(既定10)を
+    # 使うと、手動BKや復元前の安全BKで大量に消えてしまう(実際にそれで50件消えた)。
+    _prune(d, "players", cfg.players_keep if keep is None else keep, progress)
     progress(f"プレイヤーデータ: 完了 {dest.name}({n}ファイル)")
     return str(dest)
 
