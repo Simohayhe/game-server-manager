@@ -53,12 +53,16 @@ def _kill_service() -> None:
 
     GUI本体は --service を付けずに起動しているので巻き込まない。
     """
+    # サービスの起動形式は2通り: `main_app.py --service` と `pythonw main_service.py`
+    # (SAC回避運用)。どちらも止める。GUI本体(main_app.py 単独)は対象外。
     if os.name != "nt":
-        subprocess.run(["pkill", "-f", "main_app.py --service"], check=False)
+        subprocess.run(["pkill", "-f", r"main_app\.py --service|main_service\.py"],
+                       check=False)
         return
     ps = ("Get-CimInstance Win32_Process | Where-Object { "
-          "$_.CommandLine -match '--service' -and ($_.Name -eq 'python.exe' -or "
-          "$_.Name -eq 'pythonw.exe' -or $_.Name -eq 'GameServerManager.exe') } | "
+          "($_.CommandLine -match '--service' -or $_.CommandLine -match 'main_service\\.py') "
+          "-and ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe' -or "
+          "$_.Name -eq 'GameServerManager.exe') } | "
           "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
     subprocess.run(["powershell", "-NoProfile", "-Command", ps],
                    creationflags=0x08000000, check=False)
