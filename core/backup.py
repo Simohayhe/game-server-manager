@@ -66,6 +66,7 @@ def list_backups(cfg: BackupConfig, target: str) -> list[dict]:
                 "path": str(f), "name": f.name,
                 "size_mb": round(st.st_size / 1_000_000, 1),
                 "mtime": _dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "epoch": st.st_mtime,     # 相対時刻(◯分前)表示に使う
             })
     return out
 
@@ -156,6 +157,81 @@ def ark_player_backup(entries, cluster_dir: str | Path | None, cfg: BackupConfig
     _prune(d, "players", cfg.keep if keep is None else keep, progress)
     progress(f"プレイヤーデータ: 完了 {dest.name}({n}ファイル)")
     return str(dest)
+
+
+def ark_players_in_backup(backup_file: str | Path) -> list[dict]:
+    """プレイヤーデータBK(players_*.zip)の中身を一覧化する。
+
+    各 .arkprofile をzipから読んで解析し、誰のデータかを人間可読で返す。
+    戻り: [{entry, player_id, map_label, account_name, character_name, level, tribe_id}, ...]
+    """
+    from core import arkprofile
+    bf = Path(backup_file)
+    out: list[dict] = []
+    if not bf.exists():
+        raise BackupError(f"バックアップが見つかりません: {bf}")
+    with zipfile.ZipFile(bf) as z:
+        for name in z.namelist():
+            if not name.lower().endswith(".arkprofile"):
+                continue
+            parts = name.split("/")
+            map_label = parts[0] if parts else "?"
+            pid = Path(name).stem
+            try:
+                info = arkprofile.parse_bytes(z.read(name), pid)
+            except Exception:                                  # noqa: BLE001
+                info = {"player_id": pid, "account_name": None,
+                        "character_name": None, "tribe_id": None, "level": None}
+            info["entry"] = name
+            info["map_label"] = map_label
+            out.append(info)
+    # 表示名でソート(名前不明は後ろ)
+    out.sort(key=lambda d: ((d.get("account_name") or "￿").lower(),
+                            d.get("map_label") or ""))
+    return out
+
+
+def ark_player_restore(backup_file: str | Path, label_to_root: dict,
+                       cluster_dir: str | Path | None,
+                       entries: list[str] | None = None,
+                       progress=lambda t: None) -> int:
+    """プレイヤーデータBKから指定エントリ(なければ全部)を元の場所へ復元する。
+
+    label_to_root: {map_label: saved_root}。zip内 "<label>/<rel>" を saved_root/<rel> へ。
+    "_cluster/<rel>" は cluster_dir/<rel> へ。復元したファイル数を返す。
+    ※ 上書き。呼び出し側で対象マップ停止＋事前の安全バックアップを行うこと。
+    """
+    bf = Path(backup_file)
+    if not bf.exists():
+        raise BackupError(f"バックアップが見つかりません: {bf}")
+    want = set(entries) if entries is not None else None
+    n = 0
+    with zipfile.ZipFile(bf) as z:
+        for name in z.namelist():
+            if name.endswith("/"):
+                continue
+            if want is not None and name not in want:
+                continue
+            parts = name.split("/", 1)
+            if len(parts) != 2:
+                continue
+            head, rel = parts
+            if head == "_cluster":
+                if not cluster_dir:
+                    continue
+                dst = Path(cluster_dir) / rel
+            else:
+                root = label_to_root.get(head)
+                if not root:
+                    progress(f"⚠ マップ '{head}' の保存先が不明なのでスキップ")
+                    continue
+                dst = Path(root) / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(name) as src, open(dst, "wb") as f:
+                f.write(src.read())
+            n += 1
+    progress(f"復元完了: {n} ファイル")
+    return n
 
 
 def ark_restore(backup_file: str, saved_root: str | Path,

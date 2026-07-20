@@ -212,6 +212,197 @@ class BackupDialog(ctk.CTkToplevel):
         self.worker.submit(lambda: self.restore_fn(b["path"]), done)
 
 
+def _rel_time(epoch) -> str:
+    """epoch秒 → 「◯分前」等の相対表記。"""
+    import time
+    if not epoch:
+        return ""
+    d = max(0, int(time.time() - float(epoch)))
+    if d < 60:
+        return "たった今"
+    if d < 3600:
+        return f"{d // 60}分前"
+    if d < 86400:
+        return f"{d // 3600}時間前"
+    return f"{d // 86400}日前"
+
+
+class PlayerRestoreDialog(ctk.CTkToplevel):
+    """ARK プレイヤーデータ復元。左=バックアップ(時点)一覧、右=その中のプレイヤー一覧。
+
+    「このプレイヤーを◯分前の状態に」= 時点を選ぶ → プレイヤーを選ぶ → 復元。
+    名前/キャラ名/レベル/所属マップを表示するので、cryptic なIDでなく人で選べる。
+    """
+
+    def __init__(self, master, worker, list_backups_fn, list_players_fn, restore_fn):
+        super().__init__(master)
+        self.title("プレイヤーデータ復元 — ARK")
+        self.geometry("820x560")
+        self.configure(fg_color="#0f1115")
+        self.worker = worker
+        self.list_backups_fn = list_backups_fn
+        self.list_players_fn = list_players_fn
+        self.restore_fn = restore_fn
+        self._backups: list[dict] = []
+        self._players: list[dict] = []
+        self._cur_file = None
+
+        ctk.CTkLabel(self, text="🧬 プレイヤーデータ復元", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(
+            anchor="w", padx=14, pady=(12, 2))
+        ctk.CTkLabel(
+            self, text="① 復元したい時点(バックアップ)を選ぶ → ② 戻したいプレイヤーを選ぶ → 復元。"
+            "\n復元は現在のデータを上書きします(実行前に自動で安全バックアップを取ります)。"
+            "対象マップが稼働中だと停止を促されます。",
+            text_color=MUTED, anchor="w", justify="left",
+            font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14)
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=12, pady=8)
+
+        # 左: バックアップ(時点)一覧
+        left = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
+        left.pack(side="left", fill="both", expand=False, padx=(0, 6))
+        ctk.CTkLabel(left, text="時点(バックアップ)", text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=(6, 0))
+        self.bk_tree = ttk.Treeview(left, columns=("when",), show="tree headings",
+                                    height=18, selectmode="browse", style="D.Treeview")
+        self.bk_tree.heading("#0", text="日時")
+        self.bk_tree.column("#0", width=150)
+        self.bk_tree.heading("when", text="いつ")
+        self.bk_tree.column("when", width=90, anchor="center")
+        self.bk_tree.pack(fill="both", expand=True, padx=6, pady=6)
+        self.bk_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_pick_backup())
+
+        # 右: プレイヤー一覧
+        right = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
+        right.pack(side="left", fill="both", expand=True)
+        ctk.CTkLabel(right, text="この時点に含まれるプレイヤー(複数選択可)", text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=(6, 0))
+        self.pl_tree = ttk.Treeview(
+            right, columns=("char", "map", "level"), show="tree headings",
+            height=18, selectmode="extended", style="D.Treeview")
+        self.pl_tree.heading("#0", text="アカウント名")
+        self.pl_tree.column("#0", width=180)
+        self.pl_tree.heading("char", text="キャラ名")
+        self.pl_tree.column("char", width=140)
+        self.pl_tree.heading("map", text="マップ")
+        self.pl_tree.column("map", width=100, anchor="center")
+        self.pl_tree.heading("level", text="Lv")
+        self.pl_tree.column("level", width=45, anchor="center")
+        self.pl_tree.pack(fill="both", expand=True, side="left", padx=(6, 0), pady=6)
+        psb = ttk.Scrollbar(right, orient="vertical", command=self.pl_tree.yview,
+                            style="D.Vertical.TScrollbar")
+        psb.pack(side="right", fill="y", pady=6, padx=(0, 6))
+        self.pl_tree.configure(yscrollcommand=psb.set)
+
+        self.status = ctk.CTkLabel(self, text="", text_color=MUTED,
+                                   font=ctk.CTkFont(size=11))
+        self.status.pack(anchor="w", padx=14)
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=12, pady=(4, 12))
+        ctk.CTkButton(bar, text="↩ 選択プレイヤーを復元", height=32, corner_radius=6,
+                      fg_color="#3a2226", hover_color="#4d2a30",
+                      command=self._restore_selected).pack(side="left")
+        ctk.CTkButton(bar, text="↩ この時点を丸ごと復元(全員)", height=32, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self._restore_all).pack(side="left", padx=8)
+        ctk.CTkButton(bar, text="再読込", height=32, width=70, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self._load_backups).pack(side="right")
+        self.after(120, self.lift)
+        self._load_backups()
+
+    def _load_backups(self):
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.status.configure(text=f"BK一覧の取得に失敗: {err}")
+                return
+            self._backups = res or []
+            self.bk_tree.delete(*self.bk_tree.get_children())
+            for i, b in enumerate(self._backups):
+                self.bk_tree.insert("", "end", iid=str(i), text=b["mtime"],
+                                    values=(_rel_time(b.get("epoch")),))
+            self.pl_tree.delete(*self.pl_tree.get_children())
+            self.status.configure(
+                text=f"{len(self._backups)}件の時点。まず左で時点を選択してください。"
+                if self._backups else
+                "プレイヤーデータのバックアップがありません(先に🧬プレイヤーBKを取ってください)。")
+        self.worker.submit(self.list_backups_fn, done)
+
+    def _on_pick_backup(self):
+        sel = self.bk_tree.selection()
+        if not sel:
+            return
+        b = self._backups[int(sel[0])]
+        self._cur_file = b["path"]
+        self.status.configure(text="プレイヤー一覧を読み込み中…")
+        self.pl_tree.delete(*self.pl_tree.get_children())
+
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.status.configure(text=f"プレイヤー一覧の取得に失敗: {err}")
+                return
+            self._players = res or []
+            for i, p in enumerate(self._players):
+                acc = p.get("account_name") or f"(不明 {p.get('player_id','')[:8]})"
+                self.pl_tree.insert(
+                    "", "end", iid=str(i), text=acc,
+                    values=(p.get("character_name") or "", p.get("map_label") or "",
+                            p.get("level") or ""))
+            self.status.configure(
+                text=f"{len(self._players)}人。復元したい人を選んで「選択プレイヤーを復元」。")
+        self.worker.submit(lambda: self.list_players_fn(self._cur_file), done)
+
+    def _do_restore(self, entries, human):
+        when = ""
+        sel = self.bk_tree.selection()
+        if sel:
+            when = _rel_time(self._backups[int(sel[0])].get("epoch"))
+        if not messagebox.askyesno(
+                "復元の確認",
+                f"{human}を「{when}」の状態に戻します。\n"
+                "現在のデータは上書きされます(実行前に自動で安全バックアップを取ります)。\n"
+                "よろしいですか?", icon="warning", default="no", parent=self):
+            return
+
+        def done(_r, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                messagebox.showerror("復元", str(err), parent=self)
+                self.status.configure(text=f"復元できません: {err}")
+            else:
+                self.status.configure(text="復元を開始しました(📋タスクで進捗)")
+        self.worker.submit(lambda: self.restore_fn(self._cur_file, entries), done)
+
+    def _restore_selected(self):
+        if not self._cur_file:
+            messagebox.showinfo("時点を選択", "先に左で時点(バックアップ)を選んでください",
+                                parent=self)
+            return
+        sel = self.pl_tree.selection()
+        if not sel:
+            messagebox.showinfo("選択なし", "復元するプレイヤーを選んでください", parent=self)
+            return
+        chosen = [self._players[int(i)] for i in sel]
+        entries = [p["entry"] for p in chosen]
+        names = "、".join(p.get("account_name") or p.get("player_id", "")[:8]
+                         for p in chosen)
+        self._do_restore(entries, f"{len(chosen)}人（{names}）")
+
+    def _restore_all(self):
+        if not self._cur_file:
+            messagebox.showinfo("時点を選択", "先に左で時点(バックアップ)を選んでください",
+                                parent=self)
+            return
+        self._do_restore(None, "この時点の全プレイヤー")
+
+
 class PropsEditor(ctk.CTkToplevel):
     """server.properties 編集(MC)。キーは動的なので取得してから行を組む。
 

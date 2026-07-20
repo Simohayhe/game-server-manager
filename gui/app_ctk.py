@@ -22,7 +22,7 @@ from .dashboard import Dashboard
 from .widgets import ACCENT, CARD, ERR, MUTED, OK, TEXT, LogView
 
 DEFAULT_BASE = "http://127.0.0.1:8770"
-APP_VERSION = "3.1.1"                            # リリースtagと比較して更新通知を出す
+APP_VERSION = "3.2.0"                            # リリースtagと比較して更新通知を出す
 GITHUB_REPO = "Simohayhe/game-server-manager"    # アップデート確認先
 UI_SCALES = {"80%": 0.8, "90%": 0.9, "100%": 1.0, "110%": 1.1, "125%": 1.25}
 
@@ -334,7 +334,8 @@ class ArkPage(Page):
                                ("■ 停止", self._stop, "danger"),
                                ("🔁 再起動", self._restart, "normal"),
                                ("⬆ 更新", self._update, "normal"),
-                               ("🧬 プレイヤーBK", self._pbk, "normal")):
+                               ("🧬 プレイヤーBK", self._pbk, "normal"),
+                               ("↩ プレイヤー復元", self._prestore, "normal")):
             self.btn(b, txt, cmd, kind).pack(side="left", padx=(0, 6))
         opts = ctk.CTkFrame(self, fg_color="transparent")
         opts.pack(fill="x", pady=(8, 0))
@@ -467,6 +468,14 @@ class ArkPage(Page):
 
     def _pbk(self):
         self.act(self.client.ark_players_backup, "プレイヤーデータBK")
+
+    def _prestore(self):
+        from .dialogs import PlayerRestoreDialog
+        PlayerRestoreDialog(
+            self.winfo_toplevel(), self.worker,
+            list_backups_fn=self.client.ark_player_backups,
+            list_players_fn=self.client.ark_player_backup_players,
+            restore_fn=self.client.ark_players_restore)
 
     # ---- 右クリックメニュー(すっきり保つため副次操作はここ) ----
     def _menu_items(self):

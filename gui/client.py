@@ -127,6 +127,17 @@ class Client:
     def ark_players_backup(self) -> dict:
         return self.post("/api/ark/players-backup")
 
+    def ark_player_backups(self) -> list[dict]:
+        return self.get("/api/ark/player-backups")["backups"]
+
+    def ark_player_backup_players(self, file: str) -> list[dict]:
+        from urllib.parse import quote
+        return self.get(f"/api/ark/player-backup?file={quote(file)}")["players"]
+
+    def ark_players_restore(self, file: str, entries=None, safety: bool = True) -> dict:
+        return self.post("/api/ark/players-restore",
+                         {"file": file, "entries": entries, "safety": safety})
+
     # サーバー(MC/Palworld)
     def servers(self) -> list[dict]:
         return self.get("/api/servers")["servers"]

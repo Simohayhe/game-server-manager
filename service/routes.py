@@ -440,6 +440,61 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         return {"task_id": t.id}
     r.add("POST", "/api/ark/players-backup", ark_players_backup)
 
+    def _players_entries():
+        return [(a.cfg.map_label, str(backup.ark_saved_dir(a.cfg.config_dir)),
+                 a.cfg.save_subdir) for a in ctx.arkhosts]
+
+    def ark_player_backups(**_):
+        """プレイヤーデータBK(players_*.zip)の世代一覧。"""
+        return {"backups": backup.list_backups(ctx.backupcfg, "ARK/_players")}
+    r.add("GET", "/api/ark/player-backups", ark_player_backups)
+
+    def ark_player_backup_players(query, **_):
+        """あるBK内のプレイヤー一覧(名前解決付き)。?file=<path>"""
+        from urllib.parse import parse_qs
+        f = (parse_qs(query or "").get("file") or [None])[0]
+        if not f:
+            raise ApiError(400, "file を指定してください")
+        return {"players": backup.ark_players_in_backup(f)}
+    r.add("GET", "/api/ark/player-backup", ark_player_backup_players)
+
+    def ark_players_restore(body, **_):
+        """プレイヤーデータを復元する。body: {file, entries:[...]|null, safety:true}。
+
+        entries=null で全体復元。復元対象マップが稼働中なら 409(停止を促す)。
+        復元前に現在の状態を安全BKする(既定)。
+        """
+        f = (body or {}).get("file")
+        entries = (body or {}).get("entries")          # None=全体
+        if not f:
+            raise ApiError(400, "復元するBK(file)を指定してください")
+        label_to_root = {a.cfg.map_label: str(backup.ark_saved_dir(a.cfg.config_dir))
+                         for a in ctx.arkhosts}
+        # 対象マップの稼働チェック(プロファイルはマップ停止中に戻すのが確実)
+        if entries is None:
+            involved = set(label_to_root)
+        else:
+            involved = {e.split("/", 1)[0] for e in entries}
+        running = [a.cfg.display_name for a in ctx.arkhosts
+                   if a.cfg.map_label in involved and a.is_running()]
+        if running:
+            raise ApiError(409, "復元前に停止してください: " + "、".join(running))
+        cluster = ctx.ark_cluster_dir()
+        safety = (body or {}).get("safety", True)
+
+        def fn():
+            if safety:
+                jobs.progress("復元前に現在のプレイヤーデータを安全バックアップ中…")
+                backup.ark_player_backup(_players_entries(), cluster, ctx.backupcfg,
+                                         progress=jobs.progress)
+            n = backup.ark_player_restore(f, label_to_root, cluster,
+                                          entries=entries, progress=jobs.progress)
+            return f"{n} ファイルを復元しました"
+        t = jobs.submit("↩ プレイヤーデータ復元", fn, lane=PLAYERS_LANE,
+                        category="復元")
+        return {"task_id": t.id}
+    r.add("POST", "/api/ark/players-restore", ark_players_restore)
+
     # ---------------- MC / Palworld ----------------
     def server_list(**_):
         out = []
