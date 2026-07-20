@@ -10,6 +10,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+# CI等でstdoutがcp1252だと日本語printでUnicodeEncodeErrorになるため、UTF-8に固定。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def run_module(mod) -> tuple[int, int]:
     ok = fail = 0
