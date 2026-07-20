@@ -27,6 +27,9 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: テスト(回帰)
+        run: python tests/run_all.py
+
       - name: exe ビルド(単一)
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --name GameServerManager `
