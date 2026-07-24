@@ -100,6 +100,9 @@ class Client:
     def ark_backup(self, idx: int) -> dict:
         return self.post(f"/api/ark/{idx}/backup")
 
+    def ark_reset_world(self, idx: int, backup: bool = True) -> dict:
+        return self.post(f"/api/ark/{idx}/reset-world", {"backup": backup})
+
     def ark_update(self, idx: int) -> dict:
         return self.post(f"/api/ark/{idx}/update")
 

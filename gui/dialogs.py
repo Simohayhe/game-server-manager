@@ -537,20 +537,22 @@ class ProvisionDialog(ctk.CTkToplevel):
 
 
 class WorldResetDialog(ctk.CTkToplevel):
-    """MC ワールドリセット。破壊的なので、サーバー名を打って確認させる。
+    """ワールドリセット(MC/Palworld/ARK)。破壊的なので確認名を打たせる。
 
-    既定でリセット前に自動バックアップ(C:\\GameBackups)。任意で新シード指定。
+    既定でリセット前に自動バックアップ(C:\\GameBackups)。MCのみ新シード指定可(show_seed)。
+    reset_fn(new_seed, backup) を呼ぶ(対象の違いは呼び出し側でクロージャに閉じ込める)。
     """
 
-    def __init__(self, master, worker, name, display, reset_fn):
+    def __init__(self, master, worker, confirm_name, display, reset_fn, show_seed=True):
         super().__init__(master)
         self.title(f"ワールドリセット — {display}")
-        self.geometry("520x420")
+        self.geometry("520x420" if show_seed else "520x360")
         self.configure(fg_color="#0f1115")
         self.worker = worker
-        self.name = name
+        self.name = confirm_name
         self.display = display
         self.reset_fn = reset_fn
+        self.show_seed = show_seed
 
         ctk.CTkLabel(self, text="🔄 ワールドリセット", text_color="#ff8a8a",
                      font=ctk.CTkFont(size=15, weight="bold")).pack(
@@ -568,12 +570,15 @@ class WorldResetDialog(ctk.CTkToplevel):
         ctk.CTkCheckBox(box, text="リセット前に自動バックアップ (C:\\GameBackups)",
                         variable=self.backup_var,
                         font=ctk.CTkFont(size=12)).pack(anchor="w", padx=10, pady=(8, 4))
-        ctk.CTkLabel(box, text="新シード(空欄=ランダム)", text_color=MUTED,
-                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=10)
-        self.seed = ctk.CTkEntry(box, width=460, placeholder_text="例: 12345 / 好きな文字列")
-        self.seed.pack(anchor="w", padx=10, pady=(2, 8))
+        self.seed = None
+        if self.show_seed:
+            ctk.CTkLabel(box, text="新シード(空欄=ランダム)", text_color=MUTED,
+                         font=ctk.CTkFont(size=11)).pack(anchor="w", padx=10)
+            self.seed = ctk.CTkEntry(box, width=460,
+                                     placeholder_text="例: 12345 / 好きな文字列")
+            self.seed.pack(anchor="w", padx=10, pady=(2, 8))
 
-        ctk.CTkLabel(self, text=f"確認のため、サーバー名「{name}」を入力してください",
+        ctk.CTkLabel(self, text=f"確認のため「{confirm_name}」を入力してください",
                      text_color=MUTED, font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14)
         self.confirm = ctk.CTkEntry(self, width=480)
         self.confirm.pack(anchor="w", padx=14, pady=(2, 0))
@@ -597,7 +602,7 @@ class WorldResetDialog(ctk.CTkToplevel):
                 "確認", f"サーバー名「{self.name}」を正しく入力してください。",
                 parent=self)
             return
-        seed = self.seed.get().strip()
+        seed = self.seed.get().strip() if self.seed else ""
         do_backup = bool(self.backup_var.get())
         self.status.configure(text="リセットを開始しています…")
 
@@ -612,7 +617,7 @@ class WorldResetDialog(ctk.CTkToplevel):
                     text="リセットを開始しました(📋タスクで進捗)。")
                 self.after(1500, self.destroy)
         self.worker.submit(
-            lambda: self.reset_fn(self.name, new_seed=seed, backup=do_backup), done)
+            lambda: self.reset_fn(new_seed=seed, backup=do_backup), done)
 
 
 class VmCloneDialog(ctk.CTkToplevel):

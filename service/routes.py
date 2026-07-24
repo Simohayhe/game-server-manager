@@ -295,6 +295,40 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         return {"task_id": t.id}
     r.add("POST", r"/api/ark/(?P<idx>\d+)/restore", ark_restore)
 
+    def ark_reset_world(params, body, **_):
+        """ARKマップのワールドをリセット(セーブ削除→再生成)。既定で事前バックアップ。
+
+        破壊的。停止→(BK)→セーブ削除→起動。GUI側で強く確認すること。
+        """
+        import re as _re
+        ah = _ark(params)
+        idx = int(params["idx"])
+        do_backup = (body or {}).get("backup", True)
+        m = _re.match(r'"?([A-Za-z0-9_]+)', ah.cfg.launch_args)
+        wp = m.group(1) if m else None
+        if not wp:
+            raise ApiError(400, "マップ名(WP)を特定できません")
+        saved_root = str(backup.ark_saved_dir(ah.cfg.config_dir))
+        mark("stop", f"ark:{idx}")        # 停止=意図的(クラッシュ復旧させない)
+
+        def fn():
+            if do_backup:
+                jobs.progress("リセット前に自動バックアップ…")
+                backup.ark_backup(saved_root, ctx.backupcfg, ah.cfg.map_label,
+                                  ah.cfg.save_subdir, progress=jobs.progress)
+            if ah.is_running():
+                jobs.progress("停止中…")
+                ah.stop(progress=jobs.progress)
+            backup.ark_reset_world(saved_root, ah.cfg.save_subdir, wp,
+                                   progress=jobs.progress)
+            jobs.progress("起動中(新規生成)…")
+            ah.start(progress=jobs.progress)
+            return "ワールドをリセットしました(新規生成中)"
+        t = jobs.submit(f"🔄 ワールドリセット: {ah.cfg.display_name}", fn,
+                        lane=ark_lane(ah.cfg.map_label), category="ワールドリセット")
+        return {"task_id": t.id}
+    r.add("POST", r"/api/ark/(?P<idx>\d+)/reset-world", ark_reset_world)
+
     def ark_batch(body, **_):
         """複数マップを順番に処理する(ローリング)。同時に1マップしか落ちない/立ち上げない。
 
@@ -721,8 +755,9 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         """
         srv = _srv(params)
         name = params["name"]
-        if srv.profile.game != "minecraft":
-            raise ApiError(400, "ワールドリセットは現在Minecraftのみ対応です")
+        game = srv.profile.game
+        if game not in ("minecraft", "palworld"):
+            raise ApiError(400, "ワールドリセットはMinecraft/Palworldのみ対応です")
         seed = (body or {}).get("new_seed") or None
         do_backup = (body or {}).get("backup", True)
         mark("restart", f"mc:{name}")     # リセット中の停止=意図的(クラッシュ復旧させない)
@@ -730,8 +765,12 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         def fn():
             if do_backup:
                 jobs.progress("リセット前に自動バックアップ中…")
-                backup.mc_backup(srv.profile, ctx.backupcfg, progress=jobs.progress)
-            backup.mc_reset_world(srv.profile, new_seed=seed, progress=jobs.progress)
+                bk = backup.pal_backup if game == "palworld" else backup.mc_backup
+                bk(srv.profile, ctx.backupcfg, progress=jobs.progress)
+            if game == "palworld":
+                backup.pal_reset_world(srv.profile, progress=jobs.progress)
+            else:
+                backup.mc_reset_world(srv.profile, new_seed=seed, progress=jobs.progress)
             try:                          # 状態を即反映
                 st = srv.status()
                 state.set_server(name, status=st, ready=(st == "active"))

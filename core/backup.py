@@ -237,6 +237,60 @@ def ark_player_restore(backup_file: str | Path, label_to_root: dict,
     return n
 
 
+def ark_reset_world(saved_root: str | Path, save_subdir: str, wp: str,
+                    progress=lambda t: None) -> int:
+    """ARKマップのセーブ(<Saved>/<save_subdir>/<WP>/)を削除する(=リセット)。
+
+    **破壊的**: そのマップのワールド/トライブ/プレイヤーが消え、次回起動で新規生成される。
+    呼び出し側で「停止→(バックアップ)→これ→起動」の順に。削除したファイル数を返す。
+    """
+    import shutil
+    folder = Path(saved_root) / save_subdir / wp
+    n = 0
+    if folder.exists():
+        n = sum(1 for _ in folder.rglob("*") if _.is_file())
+        progress(f"セーブ削除: {folder}({n}ファイル)")
+        shutil.rmtree(folder, ignore_errors=True)
+    else:
+        progress(f"セーブ({folder})が見つかりません(既に空?)")
+    progress("削除完了(次回起動で新規生成)")
+    return n
+
+
+def pal_reset_world(profile, progress=lambda t: None) -> None:
+    """Palworldのワールド(Pal/Saved/SaveGames)を削除して作り直す。設定(Config)は残す。
+
+    **破壊的**: 建築・キャラ・ギルド等が消える。呼び出し側で事前バックアップを。
+    停止→SaveGames削除→起動で新規生成。
+    """
+    client = _ssh(profile)
+    try:
+        install = profile.install_dir
+        svc = profile.service
+        owner = profile.ssh_user
+        script = (f"#!/bin/bash\nset -e\n"
+                  f"systemctl stop {svc}\n"
+                  f"rm -rf '{install}/Pal/Saved/SaveGames'\n"
+                  f"chown -R {owner}:{owner} '{install}/Pal/Saved' 2>/dev/null || true\n"
+                  f"systemctl start {svc}\n"
+                  f"echo RESET_OK\n")
+        sftp = client.open_sftp()
+        with sftp.open("/tmp/gsm_pal_reset.sh", "w") as f:
+            f.write(script)
+        sftp.close()
+        progress(f"{profile.display_name}: 停止→ワールド削除→再生成…")
+        stdin, stdout, _ = client.exec_command(
+            "sudo -S bash /tmp/gsm_pal_reset.sh 2>&1", timeout=300)
+        stdin.write(profile.ssh_password + "\n")
+        stdin.flush()
+        out = stdout.read().decode("utf-8", "replace")
+        if "RESET_OK" not in out:
+            raise BackupError(f"ワールドリセットに失敗しました:\n{out[-500:]}")
+    finally:
+        client.close()
+    progress("ワールドリセット完了(新しいワールドで再生成中)")
+
+
 def ark_restore(backup_file: str, saved_root: str | Path,
                 progress=lambda t: None) -> None:
     """マップ単位のバックアップをSavedへ展開する(zip内の save_subdir/ を元位置へ)。"""

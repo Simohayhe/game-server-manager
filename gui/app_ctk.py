@@ -22,7 +22,7 @@ from .dashboard import Dashboard
 from .widgets import ACCENT, CARD, ERR, MUTED, OK, TEXT, LogView
 
 DEFAULT_BASE = "http://127.0.0.1:8770"
-APP_VERSION = "3.5.0"                            # リリースtagと比較して更新通知を出す
+APP_VERSION = "3.6.0"                            # リリースtagと比較して更新通知を出す
 GITHUB_REPO = "Simohayhe/game-server-manager"    # アップデート確認先
 UI_SCALES = {"80%": 0.8, "90%": 0.9, "100%": 1.0, "110%": 1.1, "125%": 1.25}
 
@@ -469,6 +469,16 @@ class ArkPage(Page):
     def _pbk(self):
         self.act(self.client.ark_players_backup, "プレイヤーデータBK")
 
+    def _reset_world(self, a):
+        from .dialogs import WorldResetDialog
+        idx = a["index"]
+        WorldResetDialog(
+            self.winfo_toplevel(), self.worker,
+            a["display_name"], a["display_name"],
+            reset_fn=lambda new_seed, backup: self.client.ark_reset_world(
+                idx, backup=backup),
+            show_seed=False)                          # ARKはシード指定なし
+
     def _player_cmd(self, idx):
         a = self._sel_silent()
         name = a["display_name"] if a else "ARK"
@@ -500,6 +510,7 @@ class ArkPage(Page):
             ("⚡ 動的設定(無停止・色/倍率)", self._dynconfig),
             ("📝 生設定ファイル編集(上級者)", self._raw_settings),
             ("💾 バックアップ/復元", self._backup_dialog),
+            ("🔄 ワールドリセット(危険)", lambda: self._reset_world(a)),
             None,
             ("🦕 野生恐竜を今すぐリスポーン(告知あり)",
              lambda: self._quick(idx, "respawn", "恐竜リスポーン")),
@@ -707,7 +718,7 @@ class ServerPage(Page):
                           lambda: self._mc_settings(s)))
             items.append(("🧩 Mod管理", lambda: self._mc_mods(s)))
         items.append(("💾 バックアップ/復元", lambda: self._backup_dialog(s)))
-        if self.game == "minecraft":
+        if self.game in ("minecraft", "palworld"):
             items.append(("🔄 ワールドリセット(危険)", lambda: self._reset_world(s)))
         items += [None,
                   ("🌍 外部公開", lambda: self._publish(s, False)),
@@ -720,9 +731,13 @@ class ServerPage(Page):
 
     def _reset_world(self, s):
         from .dialogs import WorldResetDialog
-        WorldResetDialog(self.winfo_toplevel(), self.worker, s["name"],
-                         s.get("display_name") or s["name"],
-                         reset_fn=self.client.server_reset_world)
+        name = s["name"]
+        WorldResetDialog(
+            self.winfo_toplevel(), self.worker, name,
+            s.get("display_name") or name,
+            reset_fn=lambda new_seed, backup: self.client.server_reset_world(
+                name, new_seed=new_seed, backup=backup),
+            show_seed=(self.game == "minecraft"))    # シードはMCのみ
 
     def _publish(self, s, stop):
         name, disp = s["name"], s["display_name"]
