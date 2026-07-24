@@ -162,6 +162,10 @@ class Client:
     def server_backup(self, name: str) -> dict:
         return self.post(f"/api/servers/{name}/backup", {})
 
+    def server_reset_world(self, name: str, new_seed: str = "", backup: bool = True) -> dict:
+        return self.post(f"/api/servers/{name}/reset-world",
+                         {"new_seed": new_seed or None, "backup": backup})
+
     def server_restore(self, name: str, file: str) -> dict:
         return self.post(f"/api/servers/{name}/restore", {"file": file})
 

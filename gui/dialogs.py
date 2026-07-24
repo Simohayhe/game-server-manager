@@ -536,6 +536,85 @@ class ProvisionDialog(ctk.CTkToplevel):
         self.worker.submit(lambda: self.provision_fn(**body), done)
 
 
+class WorldResetDialog(ctk.CTkToplevel):
+    """MC ワールドリセット。破壊的なので、サーバー名を打って確認させる。
+
+    既定でリセット前に自動バックアップ(C:\\GameBackups)。任意で新シード指定。
+    """
+
+    def __init__(self, master, worker, name, display, reset_fn):
+        super().__init__(master)
+        self.title(f"ワールドリセット — {display}")
+        self.geometry("520x420")
+        self.configure(fg_color="#0f1115")
+        self.worker = worker
+        self.name = name
+        self.display = display
+        self.reset_fn = reset_fn
+
+        ctk.CTkLabel(self, text="🔄 ワールドリセット", text_color="#ff8a8a",
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(
+            anchor="w", padx=14, pady=(12, 2))
+        ctk.CTkLabel(
+            self, text=f"「{display}」のワールドを削除して作り直します。"
+            "\n⚠ 建築・地形・進行は全て消えます(テイム/インベントリ等も)。元に戻せません。"
+            "\n(world / world_nether / world_the_end を削除→新規生成)",
+            text_color=MUTED, anchor="w", justify="left", wraplength=480,
+            font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14)
+
+        box = ctk.CTkFrame(self, fg_color=CARD, corner_radius=8)
+        box.pack(fill="x", padx=12, pady=10)
+        self.backup_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(box, text="リセット前に自動バックアップ (C:\\GameBackups)",
+                        variable=self.backup_var,
+                        font=ctk.CTkFont(size=12)).pack(anchor="w", padx=10, pady=(8, 4))
+        ctk.CTkLabel(box, text="新シード(空欄=ランダム)", text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=10)
+        self.seed = ctk.CTkEntry(box, width=460, placeholder_text="例: 12345 / 好きな文字列")
+        self.seed.pack(anchor="w", padx=10, pady=(2, 8))
+
+        ctk.CTkLabel(self, text=f"確認のため、サーバー名「{name}」を入力してください",
+                     text_color=MUTED, font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14)
+        self.confirm = ctk.CTkEntry(self, width=480)
+        self.confirm.pack(anchor="w", padx=14, pady=(2, 0))
+
+        self.status = ctk.CTkLabel(self, text="", text_color=MUTED,
+                                   font=ctk.CTkFont(size=11))
+        self.status.pack(anchor="w", padx=14, pady=(6, 0))
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=12, pady=(6, 12))
+        ctk.CTkButton(bar, text="🔄 リセットする", height=34, corner_radius=6,
+                      fg_color="#7a2530", hover_color="#94303c",
+                      command=self._reset).pack(side="left")
+        ctk.CTkButton(bar, text="やめる", height=34, width=80, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self.destroy).pack(side="right")
+        self.after(120, self.lift)
+
+    def _reset(self):
+        if self.confirm.get().strip() != self.name:
+            messagebox.showwarning(
+                "確認", f"サーバー名「{self.name}」を正しく入力してください。",
+                parent=self)
+            return
+        seed = self.seed.get().strip()
+        do_backup = bool(self.backup_var.get())
+        self.status.configure(text="リセットを開始しています…")
+
+        def done(_r, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.status.configure(text=f"失敗: {err}")
+                messagebox.showerror("ワールドリセット", str(err), parent=self)
+            else:
+                self.status.configure(
+                    text="リセットを開始しました(📋タスクで進捗)。")
+                self.after(1500, self.destroy)
+        self.worker.submit(
+            lambda: self.reset_fn(self.name, new_seed=seed, backup=do_backup), done)
+
+
 class VmCloneDialog(ctk.CTkToplevel):
     """テンプレVMを複製→個体化(hostname/IP変更)して、構築可能な空VMを作る。
 

@@ -330,6 +330,48 @@ echo RESTORE_OK
     progress("復元完了")
 
 
+def mc_reset_world(profile, new_seed: str | None = None, world: str = "world",
+                   progress=lambda t: None) -> None:
+    """MCのワールドを削除して作り直す(=リセット)。サーバーを停止→ワールド削除→(任意で
+    シード設定)→起動で、次回起動時に新しいワールドが自動生成される。
+
+    **破壊的**: world/world_nether/world_the_end を消す。呼び出し側で必ず事前バックアップを。
+    """
+    client = _ssh(profile)
+    try:
+        install = profile.install_dir
+        svc = profile.service
+        seed_cmd = ""
+        if new_seed:
+            s = str(new_seed).replace("'", "")     # server.properties用に軽くサニタイズ
+            seed_cmd = (f"sed -i '/^level-seed=/d' server.properties\n"
+                        f"echo 'level-seed={s}' >> server.properties\n")
+        script = (f"#!/bin/bash\nset -e\n"
+                  f"systemctl stop {svc}\n"
+                  f"cd '{install}'\n"
+                  f"rm -rf '{world}' '{world}_nether' '{world}_the_end'\n"
+                  f"{seed_cmd}"
+                  f"chown -R {profile.runtime_user}:{profile.runtime_user} '{install}'\n"
+                  f"systemctl start {svc}\n"
+                  f"echo RESET_OK\n")
+        sftp = client.open_sftp()
+        with sftp.open("/tmp/gsm_mc_reset.sh", "w") as f:
+            f.write(script)
+        sftp.close()
+        progress(f"{profile.display_name}: 停止→ワールド削除→再生成…"
+                 + (f"(シード {new_seed})" if new_seed else ""))
+        stdin, stdout, _ = client.exec_command(
+            "sudo -S bash /tmp/gsm_mc_reset.sh 2>&1", timeout=300)
+        stdin.write(profile.ssh_password + "\n")
+        stdin.flush()
+        out = stdout.read().decode("utf-8", "replace")
+        if "RESET_OK" not in out:
+            raise BackupError(f"ワールドリセットに失敗しました:\n{out[-500:]}")
+    finally:
+        client.close()
+    progress("ワールドリセット完了(新しいワールドで再生成中)")
+
+
 # ---------------------------------------------------------------------------
 # Palworld(VM・SSH)。セーブ一式(Pal/Saved)をtar.gz。
 # ---------------------------------------------------------------------------

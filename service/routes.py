@@ -714,6 +714,35 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         return {"task_id": t.id}
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/restore", server_restore)
 
+    def server_reset_world(params, body, **_):
+        """MCのワールドをリセット(削除→再生成)。既定でリセット前に自動バックアップ。
+
+        body: {new_seed?, backup?(既定True)}。破壊的なのでGUI側で強く確認すること。
+        """
+        srv = _srv(params)
+        name = params["name"]
+        if srv.profile.game != "minecraft":
+            raise ApiError(400, "ワールドリセットは現在Minecraftのみ対応です")
+        seed = (body or {}).get("new_seed") or None
+        do_backup = (body or {}).get("backup", True)
+        mark("restart", f"mc:{name}")     # リセット中の停止=意図的(クラッシュ復旧させない)
+
+        def fn():
+            if do_backup:
+                jobs.progress("リセット前に自動バックアップ中…")
+                backup.mc_backup(srv.profile, ctx.backupcfg, progress=jobs.progress)
+            backup.mc_reset_world(srv.profile, new_seed=seed, progress=jobs.progress)
+            try:                          # 状態を即反映
+                st = srv.status()
+                state.set_server(name, status=st, ready=(st == "active"))
+            except Exception:             # noqa: BLE001
+                pass
+            return "ワールドをリセットしました(新規生成中)"
+        t = jobs.submit(f"🔄 ワールドリセット: {srv.profile.display_name}", fn,
+                        lane=server_lane(name), category="ワールドリセット")
+        return {"task_id": t.id}
+    r.add("POST", r"/api/servers/(?P<name>[^/]+)/reset-world", server_reset_world)
+
     def server_palconfig_get(params, query, **_):
         """Palworldの現在設定を読む。keys=Key1,Key2,... で指定キーの値を返す。"""
         srv = _srv(params)
