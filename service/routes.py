@@ -515,6 +515,82 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         return {"task_id": t.id}
     r.add("POST", "/api/ark/players-restore", ark_players_restore)
 
+    # ---------------- 新規サーバー構築(プロビジョニング) ----------------
+    def provision_templates(**_):
+        """構築テンプレ(Fabric/Forge等)とその既定バージョンを返す。"""
+        from core import provision as prov
+        return {"templates": [
+            {"id": t.id, "label": t.label, "display_name": t.display_name,
+             "mc_version": t.mc_version, "description": t.description,
+             "game_port": t.defaults.get("game_port", 25565)}
+            for t in prov.load_templates()]}
+    r.add("GET", "/api/provision/templates", provision_templates)
+
+    def provision_new(body, **_):
+        """既存VM(SSH到達可)に指定バージョンのサーバーを構築し、config追記＋反映する。
+
+        body: {template_id, name, display_name, mc_version, host, ssh_user,
+               ssh_password, vm?, game_port?, motd?, memory_max_mb?}
+        """
+        from core import provision as prov
+        b = body or {}
+        tid = b.get("template_id")
+        name = (b.get("name") or "").strip()
+        host = (b.get("host") or "").strip()
+        ssh_user = b.get("ssh_user")
+        ssh_pass = b.get("ssh_password")
+        if not all([tid, name, host, ssh_user, ssh_pass]):
+            raise ApiError(400, "template_id / name / host / ssh_user / ssh_password は必須です")
+        if any(p.name == name for p in ctx.config.servers):
+            raise ApiError(409, f"サーバー名 '{name}' は既に存在します")
+        tmap = {t.id: t for t in prov.load_templates()}
+        t = tmap.get(tid)
+        if not t:
+            raise ApiError(400, f"不明なテンプレート: {tid}")
+
+        d = dict(t.defaults)
+        rcon_pw = prov.generate_password()
+        version = (b.get("mc_version") or d.get("mc_version") or "").strip()
+        game_port = int(b.get("game_port") or d.get("game_port") or 25565)
+        rcon_port = int(d.get("rcon_port") or 25575)
+        params = {
+            **d,
+            "mc_version": version,
+            "motd": b.get("motd") or d.get("motd") or "A Minecraft Server",
+            "memory_max_mb": b.get("memory_max_mb") or d.get("memory_max_mb") or "auto",
+            "game_port": game_port, "rcon_port": rcon_port,
+            "service": d.get("service", "minecraft"),
+            "install_dir": d.get("install_dir", "/opt/minecraft"),
+            "runtime_user": d.get("runtime_user", "minecraft"),
+            "ssh_user": ssh_user, "rcon_password": rcon_pw,
+        }
+        script = prov.render_script(t, params)       # 未指定プレースホルダはここで検出
+        display = b.get("display_name") or name
+        vm = (b.get("vm") or "").strip()
+
+        def fn():
+            jobs.progress(f"{host} に {t.display_name} {version} を構築開始…")
+            prov.provision(host, ssh_user, ssh_pass, script, progress=jobs.progress)
+            profile: dict = {"display_name": display}
+            if vm:
+                profile["vm"] = vm
+            profile.update({
+                "address": host,
+                "ssh": {"user": ssh_user, "password": ssh_pass},
+                "service": params["service"],
+                "rcon": {"port": rcon_port, "password": rcon_pw},
+                "game_port": game_port,
+                "players_command": t.profile_extra.get("players_command", "list"),
+                "version_pattern": t.profile_extra.get("version_pattern"),
+                "players_pattern": t.profile_extra.get("players_pattern"),
+            })
+            prov.append_profile_to_config(ctx.config_path, name, profile)
+            ctx.reload()                             # 稼働中サービスに即反映
+            return f"{display}({version}) を構築し、一覧に追加しました"
+        task = jobs.submit(f"⚙ 新規構築: {display} {version}", fn, category="構築")
+        return {"task_id": task.id}
+    r.add("POST", "/api/provision", provision_new)
+
     # ---------------- MC / Palworld ----------------
     def server_list(**_):
         out = []

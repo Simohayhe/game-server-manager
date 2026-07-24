@@ -22,7 +22,7 @@ from .dashboard import Dashboard
 from .widgets import ACCENT, CARD, ERR, MUTED, OK, TEXT, LogView
 
 DEFAULT_BASE = "http://127.0.0.1:8770"
-APP_VERSION = "3.2.0"                            # リリースtagと比較して更新通知を出す
+APP_VERSION = "3.3.0"                            # リリースtagと比較して更新通知を出す
 GITHUB_REPO = "Simohayhe/game-server-manager"    # アップデート確認先
 UI_SCALES = {"80%": 0.8, "90%": 0.9, "100%": 1.0, "110%": 1.1, "125%": 1.25}
 
@@ -618,6 +618,9 @@ class ServerPage(Page):
                                ("🔁 再起動", "restart", "normal")):
             self.btn(b, txt, lambda a=act: self._act(a), kind).pack(side="left",
                                                                     padx=(0, 6))
+        if self.game == "minecraft":     # 新規構築(バージョン選択)はMCのみ
+            self.btn(b, "⚙ 新規構築", self._new_server, "normal").pack(
+                side="left", padx=(0, 6))
         ctk.CTkLabel(self, text="ライブログ", text_color=MUTED,
                      font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w",
                                                                     pady=(14, 4))
@@ -627,6 +630,14 @@ class ServerPage(Page):
         self.log = LogView(self, self._log_fn, Worker(self, 20, "srv-log"))
         self.log.pack(fill="both", expand=True)   # 追尾は on_show で開始する
         self.poll(self.client.servers, self._fill)
+
+    def _new_server(self):
+        from .dialogs import ProvisionDialog
+        ProvisionDialog(
+            self.winfo_toplevel(), self.worker,
+            templates_fn=self.client.provision_templates,
+            provision_fn=self.client.provision,
+            vms_fn=self.client.vms)
 
     def _fill(self, servers):
         self._rows = [s for s in servers if s["game"] == self.game]

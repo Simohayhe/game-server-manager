@@ -231,6 +231,12 @@ class Client:
                          timeout=30)["response"]
 
     # VM(Hyper-V)
+    def provision_templates(self) -> list[dict]:
+        return self.get("/api/provision/templates")["templates"]
+
+    def provision(self, **body) -> dict:
+        return self.post("/api/provision", body, timeout=60)
+
     def vms(self) -> list[dict]:
         return self.get("/api/vms", timeout=30)["vms"]
 

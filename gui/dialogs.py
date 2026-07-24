@@ -403,6 +403,139 @@ class PlayerRestoreDialog(ctk.CTkToplevel):
         self._do_restore(None, "この時点の全プレイヤー")
 
 
+class ProvisionDialog(ctk.CTkToplevel):
+    """新規サーバー構築(Fabric/Forge・MCバージョン選択)。
+
+    既にSSH到達可能なUbuntu VM(空)を用意しておき、ここでゲーム種別/バージョン等を指定すると
+    SSHで全自動構築→config追記→一覧に即反映。
+    """
+
+    def __init__(self, master, worker, templates_fn, provision_fn, vms_fn=None):
+        super().__init__(master)
+        self.title("新規サーバー構築")
+        self.geometry("560x620")
+        self.configure(fg_color="#0f1115")
+        self.worker = worker
+        self.templates_fn = templates_fn
+        self.provision_fn = provision_fn
+        self.vms_fn = vms_fn
+        self._templates: list[dict] = []
+        self._rows: dict = {}
+
+        ctk.CTkLabel(self, text="⚙ 新規サーバー構築", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(
+            anchor="w", padx=14, pady=(12, 2))
+        ctk.CTkLabel(
+            self, text="SSH到達可能な空のUbuntu VMに、指定バージョンで全自動構築します"
+            "(Java導入〜systemd化まで)。完了後 config に追記され一覧に出ます。",
+            text_color=MUTED, anchor="w", justify="left", wraplength=520,
+            font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14)
+
+        form = ctk.CTkScrollableFrame(self, fg_color=CARD, corner_radius=8)
+        form.pack(fill="both", expand=True, padx=12, pady=8)
+
+        # テンプレ(ゲーム種別)ドロップダウン
+        ctk.CTkLabel(form, text="種別(ローダー)", text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=(6, 0))
+        self.tmpl_menu = ctk.CTkOptionMenu(form, values=["(読込中…)"], width=500,
+                                           fg_color="#2b303a", button_color="#39404d",
+                                           button_hover_color="#4a515e",
+                                           command=self._on_tmpl)
+        self.tmpl_menu.pack(anchor="w", padx=8, pady=(2, 4))
+
+        self._add_row(form, "mc_version", "MCバージョン", "26.2")
+        self._add_row(form, "name", "サーバー名(英数字・config内で一意)", "minecraft4")
+        self._add_row(form, "display_name", "表示名", "マイクラ4")
+        self._add_row(form, "host", "構築先ホスト(VMのIP)", "192.168.11.103")
+        self._add_row(form, "vm", "VM名(任意・自動起動連携に使う)", "mcserver04")
+        self._add_row(form, "ssh_user", "SSHユーザー", "master")
+        self._add_row(form, "ssh_password", "SSHパスワード", "", secret=True)
+        self._add_row(form, "game_port", "ゲームポート", "25565")
+        self._add_row(form, "motd", "MOTD(任意)", "A Minecraft Server")
+
+        self.status = ctk.CTkLabel(self, text="", text_color=MUTED, wraplength=520,
+                                   justify="left", font=ctk.CTkFont(size=11))
+        self.status.pack(anchor="w", padx=14)
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=12, pady=(2, 12))
+        ctk.CTkButton(bar, text="⚙ 構築する", height=34, corner_radius=6, fg_color=ACCENT,
+                      hover_color="#4a86e0", command=self._build).pack(side="left")
+        ctk.CTkButton(bar, text="閉じる", height=34, width=80, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self.destroy).pack(side="right")
+        self.after(120, self.lift)
+        self._load_templates()
+
+    def _add_row(self, parent, key, label, default, secret=False):
+        ctk.CTkLabel(parent, text=label, text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=(6, 0))
+        e = ctk.CTkEntry(parent, width=500, show="•" if secret else "")
+        if default:
+            e.insert(0, default)
+        e.pack(anchor="w", padx=8, pady=(2, 0))
+        self._rows[key] = e
+
+    def _set(self, key, value):
+        e = self._rows[key]
+        e.delete(0, "end")
+        e.insert(0, str(value))
+
+    def _load_templates(self):
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.status.configure(text=f"テンプレ取得に失敗: {err}")
+                return
+            self._templates = res or []
+            labels = [t["label"] for t in self._templates]
+            if labels:
+                self.tmpl_menu.configure(values=labels)
+                self.tmpl_menu.set(labels[0])
+                self._on_tmpl(labels[0])
+        self.worker.submit(self.templates_fn, done)
+
+    def _cur_template(self):
+        lbl = self.tmpl_menu.get()
+        return next((t for t in self._templates if t["label"] == lbl), None)
+
+    def _on_tmpl(self, _label):
+        t = self._cur_template()
+        if not t:
+            return
+        self._set("mc_version", t.get("mc_version") or "")
+        self._set("game_port", t.get("game_port") or 25565)
+
+    def _build(self):
+        t = self._cur_template()
+        if not t:
+            messagebox.showinfo("テンプレ未選択", "種別を選んでください", parent=self)
+            return
+        v = {k: e.get().strip() for k, e in self._rows.items()}
+        for req in ("name", "host", "ssh_user", "ssh_password"):
+            if not v.get(req):
+                messagebox.showinfo("入力不足", f"「{req}」を入力してください", parent=self)
+                return
+        if not messagebox.askyesno(
+                "構築の確認",
+                f"{v['host']} に {t['display_name']} {v['mc_version']} を構築します。\n"
+                f"サーバー名: {v['name']}\n数分かかります(📋タスクで進捗)。続けますか?",
+                default="no", parent=self):
+            return
+        body = dict(v, template_id=t["id"])
+
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.status.configure(text=f"構築を開始できません: {err}")
+                messagebox.showerror("構築", str(err), parent=self)
+            else:
+                self.status.configure(
+                    text="構築を開始しました(📋タスクで進捗)。完了すると一覧に出ます。")
+        self.worker.submit(lambda: self.provision_fn(**body), done)
+
+
 class PlayerCommandDialog(ctk.CTkToplevel):
     """ARK: 接続中プレイヤーに管理コマンドを1クリックで当てる。
 
