@@ -240,6 +240,9 @@ class Client:
     def vms(self) -> list[dict]:
         return self.get("/api/vms", timeout=30)["vms"]
 
+    def vm_clone(self, **body) -> dict:
+        return self.post("/api/vms/clone", body, timeout=60)
+
     def vm_start(self, name: str) -> dict:
         return self.post(f"/api/vms/{name}/start")
 

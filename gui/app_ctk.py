@@ -22,7 +22,7 @@ from .dashboard import Dashboard
 from .widgets import ACCENT, CARD, ERR, MUTED, OK, TEXT, LogView
 
 DEFAULT_BASE = "http://127.0.0.1:8770"
-APP_VERSION = "3.3.0"                            # リリースtagと比較して更新通知を出す
+APP_VERSION = "3.4.0"                            # リリースtagと比較して更新通知を出す
 GITHUB_REPO = "Simohayhe/game-server-manager"    # アップデート確認先
 UI_SCALES = {"80%": 0.8, "90%": 0.9, "100%": 1.0, "110%": 1.1, "125%": 1.25}
 
@@ -810,6 +810,7 @@ class VmPage(Page):
         self.btn(b, "■ 停止(安全)", lambda: self._stop(False), "danger").pack(side="left",
                                                                           padx=(0, 6))
         self.btn(b, "⏹ 強制停止", lambda: self._stop(True), "danger").pack(side="left")
+        self.btn(b, "📋 クローン", self._clone, "normal").pack(side="left", padx=(6, 0))
         ctk.CTkLabel(self, text="VMを止める前に、上のゲームサーバーを保存して停止します",
                      text_color=MUTED, font=ctk.CTkFont(size=11)).pack(anchor="w",
                                                                        pady=(8, 0))
@@ -823,6 +824,11 @@ class VmPage(Page):
               f"{v['memory_mb']:,} MB" if v["memory_mb"] else "-",
               ", ".join(v.get("servers") or []) or "-"),
              ("active" if v["state"] == "Running" else "off",)) for v in vms])
+
+    def _clone(self):
+        from .dialogs import VmCloneDialog
+        VmCloneDialog(self.winfo_toplevel(), self.worker,
+                      clone_fn=self.client.vm_clone, vms_fn=self.client.vms)
 
     def _sel(self):
         return picked(self, self.t, self._vms, "name", "VM")

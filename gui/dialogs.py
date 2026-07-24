@@ -536,6 +536,91 @@ class ProvisionDialog(ctk.CTkToplevel):
         self.worker.submit(lambda: self.provision_fn(**body), done)
 
 
+class VmCloneDialog(ctk.CTkToplevel):
+    """テンプレVMを複製→個体化(hostname/IP変更)して、構築可能な空VMを作る。
+
+    完了後、そのVMを「⚙ 新規構築」の構築先に指定できる。
+    """
+
+    def __init__(self, master, worker, clone_fn, vms_fn=None):
+        super().__init__(master)
+        self.title("VMをクローン(テンプレから新規VM)")
+        self.geometry("560x580")
+        self.configure(fg_color="#0f1115")
+        self.worker = worker
+        self.clone_fn = clone_fn
+        self.vms_fn = vms_fn
+        self._rows: dict = {}
+
+        ctk.CTkLabel(self, text="📋 VMをクローン", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(
+            anchor="w", padx=14, pady=(12, 2))
+        ctk.CTkLabel(
+            self, text="常時停止のテンプレVM(例 ubuntu_template)を複製し、ホスト名とIPを個体化します。"
+            "完了後は「⚙ 新規構築」でサーバーを入れられます。",
+            text_color=MUTED, anchor="w", justify="left", wraplength=520,
+            font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14)
+
+        form = ctk.CTkScrollableFrame(self, fg_color=CARD, corner_radius=8)
+        form.pack(fill="both", expand=True, padx=12, pady=8)
+        self._add(form, "template", "テンプレVM名", "ubuntu_template")
+        self._add(form, "template_ip", "テンプレのIP(起動直後のIP)", "192.168.11.199")
+        self._add(form, "new_name", "新VM名", "mcserver04")
+        self._add(form, "hostname", "ホスト名", "mcserver04")
+        self._add(form, "new_ip", "新IP(第4オクテットのみ可 例 103)", "103")
+        self._add(form, "memory_gb", "メモリ(GB)", "4")
+        self._add(form, "cpu", "CPU数", "4")
+        self._add(form, "ssh_user", "SSHユーザー", "master")
+        self._add(form, "ssh_password", "SSHパスワード", "", secret=True)
+
+        self.status = ctk.CTkLabel(self, text="", text_color=MUTED, wraplength=520,
+                                   justify="left", font=ctk.CTkFont(size=11))
+        self.status.pack(anchor="w", padx=14)
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=12, pady=(2, 12))
+        ctk.CTkButton(bar, text="📋 クローンする", height=34, corner_radius=6,
+                      fg_color=ACCENT, hover_color="#4a86e0",
+                      command=self._clone).pack(side="left")
+        ctk.CTkButton(bar, text="閉じる", height=34, width=80, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self.destroy).pack(side="right")
+        self.after(120, self.lift)
+
+    def _add(self, parent, key, label, default, secret=False):
+        ctk.CTkLabel(parent, text=label, text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=(6, 0))
+        e = ctk.CTkEntry(parent, width=500, show="•" if secret else "")
+        if default:
+            e.insert(0, default)
+        e.pack(anchor="w", padx=8, pady=(2, 0))
+        self._rows[key] = e
+
+    def _clone(self):
+        v = {k: e.get().strip() for k, e in self._rows.items()}
+        for req in ("template", "template_ip", "new_name", "hostname", "new_ip",
+                    "ssh_user", "ssh_password"):
+            if not v.get(req):
+                messagebox.showinfo("入力不足", f"「{req}」を入力してください", parent=self)
+                return
+        if not messagebox.askyesno(
+                "クローンの確認",
+                f"{v['template']} を複製して {v['new_name']}(IP …{v['new_ip']})を作ります。\n"
+                "テンプレVMは停止しておいてください。数分かかります(📋タスクで進捗)。続けますか?",
+                default="no", parent=self):
+            return
+
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.status.configure(text=f"開始できません: {err}")
+                messagebox.showerror("VMクローン", str(err), parent=self)
+            else:
+                self.status.configure(
+                    text="クローンを開始しました(📋タスクで進捗)。完了後は「⚙ 新規構築」で使えます。")
+        self.worker.submit(lambda: self.clone_fn(**v), done)
+
+
 class PlayerCommandDialog(ctk.CTkToplevel):
     """ARK: 接続中プレイヤーに管理コマンドを1クリックで当てる。
 

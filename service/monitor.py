@@ -256,18 +256,21 @@ class Monitor:
         cache = getattr(self, "_ver_cache", None)
         if cache is None:
             cache = self._ver_cache = {}
-        if srv.profile.game != "palworld":
-            return None
-        ver, ts = cache.get(srv.profile.name, (None, 0.0))
+        name = srv.profile.name
+        ver, ts = cache.get(name, (None, 0.0))
         if ver and time.time() - ts < 600:       # 10分キャッシュ(更新後は再取得)
             return ver
         try:
-            import re
-            info = srv.rcon_command("Info")
-            m = re.search(r"\[v?([\d.]+)\]", info or "")
-            if m:
-                cache[srv.profile.name] = (m.group(1), time.time())
-                return m.group(1)
+            if srv.profile.game == "palworld":   # PalworldはRCON Infoから
+                import re
+                info = srv.rcon_command("Info")
+                m = re.search(r"\[v?([\d.]+)\]", info or "")
+                new = m.group(1) if m else None
+            else:                                # MC等はversion_patternで起動ログから抽出
+                new = srv.detect_version()
+            if new:
+                cache[name] = (new, time.time())
+                return new
         except Exception:
             pass
         return ver or None

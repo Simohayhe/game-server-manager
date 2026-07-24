@@ -623,19 +623,34 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
 
     def server_action(params, **_):
         srv = _srv(params)
+        name = params["name"]
         act = params["action"]
         if act not in ("start", "stop", "restart"):
             raise ApiError(400, f"未知の操作: {act}")
         if act in ("stop", "restart"):        # 意図的な操作=クラッシュ復旧させない
-            mark("stop" if act == "stop" else "restart", f"mc:{params['name']}")
-        # 停止/再起動はプレイヤーへ予告(MC=say / Palworld=Broadcast)してから
-        fn_map = {"start": srv.start,
-                  "stop": lambda: srv.stop_with_notice(progress=jobs.progress),
-                  "restart": lambda: srv.restart_with_notice(progress=jobs.progress)}
+            mark("stop" if act == "stop" else "restart", f"mc:{name}")
+        from core.orchestration import start_server_with_vm
+        # 起動はVMがOffなら先にVM起動→SSH応答待ち→サービス起動(VM自動起動)。
+        # 停止/再起動はプレイヤーへ予告(MC=say / Palworld=Broadcast)してから。
+        fn_map = {
+            "start": lambda: start_server_with_vm(ctx.hyperv, srv, progress=jobs.progress),
+            "stop": lambda: srv.stop_with_notice(progress=jobs.progress),
+            "restart": lambda: srv.restart_with_notice(progress=jobs.progress),
+        }
         labels = {"start": "▶ 起動", "stop": "■ 停止", "restart": "🔁 再起動"}
-        t = jobs.submit(f"{labels[act]}: {srv.profile.display_name}",
-                        lambda: (fn_map[act](), act)[1],
-                        lane=server_lane(params["name"]), category="サーバー操作")
+
+        def job():
+            fn_map[act]()
+            try:                    # 30秒のポーリング待ちを避け、即座に実状態を反映
+                st = srv.status()
+                state.set_server(name, status=st, ready=(st == "active"),
+                                 display_name=srv.profile.display_name,
+                                 game=srv.profile.game)
+            except Exception:       # noqa: BLE001
+                pass
+            return act
+        t = jobs.submit(f"{labels[act]}: {srv.profile.display_name}", job,
+                        lane=server_lane(name), category="サーバー操作")
         return {"task_id": t.id}
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/(?P<action>start|stop|restart)",
           server_action)
@@ -933,6 +948,51 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             v["servers"] = by_vm.get(v["name"], [])
         return {"vms": cached}
     r.add("GET", "/api/vms", vm_list)
+
+    def vm_clone(body, **_):
+        """テンプレVMを複製→個体化(hostname/IP)して、すぐ構築できる空VMを作る。
+
+        body: {template, new_name, hostname, new_ip, template_ip, ssh_user,
+               ssh_password, memory_gb?, cpu?}
+        流れ: clone_vm → start_vm → SSH応答待ち(template_ip) → individualize_clone(reboot)。
+        """
+        from core import orchestration as orch
+        b = body or {}
+        template = b.get("template")
+        new_name = (b.get("new_name") or "").strip()
+        hostname = (b.get("hostname") or "").strip()
+        new_ip_in = (b.get("new_ip") or "").strip()
+        template_ip = (b.get("template_ip") or "").strip()
+        ssh_user = b.get("ssh_user")
+        ssh_pass = b.get("ssh_password")
+        if not all([template, new_name, hostname, new_ip_in, template_ip,
+                    ssh_user, ssh_pass]):
+            raise ApiError(400, "template / new_name / hostname / new_ip / "
+                           "template_ip / ssh_user / ssh_password は必須です")
+        try:
+            mem_mb = int(float(b.get("memory_gb") or 4) * 1024)
+            cpu = int(b.get("cpu") or 4)
+        except (TypeError, ValueError):
+            raise ApiError(400, "メモリ/CPUは数値で指定してください")
+        net = getattr(ctx.config, "network", None)
+        new_ip = net.full_ip(new_ip_in) if net else new_ip_in
+        gateway = net.gateway if net else "192.168.11.1"
+        dns = ctx.config.dns.host if getattr(ctx.config, "dns", None) else "192.168.11.254"
+
+        def fn():
+            jobs.progress(f"{template} を {new_name} に複製中…")
+            ctx.hyperv.clone_vm(template, new_name, mem_mb, cpu)
+            jobs.progress(f"{new_name} を起動→SSH応答待ち({template_ip})…")
+            ctx.hyperv.start_vm(new_name)
+            orch._wait_for_port(template_ip, 22, timeout=180)
+            jobs.progress(f"個体化(hostname={hostname} / IP={new_ip})…再起動します")
+            orch.individualize_clone(template_ip, ssh_user, ssh_pass, hostname,
+                                     new_ip, gateway, dns, progress=jobs.progress)
+            return (f"VM {new_name}(IP {new_ip})を作成しました。"
+                    "「⚙ 新規構築」でサーバーを入れられます。")
+        t = jobs.submit(f"📋 VMクローン: {new_name}", fn, category="VM")
+        return {"task_id": t.id}
+    r.add("POST", "/api/vms/clone", vm_clone)
 
     def vm_start(params, **_):
         name = params["name"]
