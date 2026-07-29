@@ -26,6 +26,19 @@ class HyperVConfig:
 
 
 @dataclass
+class SyslogConfig:
+    """syslog受信(ルーター等のログを受けてファイル保存＋Discord転送)。
+
+    ルーターの内蔵ログは再起動で消えるので、原因究明にはこちらへ飛ばしてもらう。
+    """
+    enabled: bool = False
+    host: str = "0.0.0.0"       # LAN内の機器から受けるので既定は全インターフェース
+    port: int = 514
+    discord: bool = True        # 重要なものをDiscordへ転送するか
+    min_severity: int = 4       # 4=警告 以上を転送(数字が小さいほど重大)
+
+
+@dataclass
 class NetworkConfig:
     """VM用のLANネットワーク設定(/24前提)。"""
     prefix: str = "192.168.11"         # サブネットの先頭3オクテット
@@ -76,6 +89,7 @@ class AppConfig:
     # リアルタイムに気づける(内側からの通知は経路が死ぬと送れないため)。
     heartbeat_url: str = ""
     heartbeat_interval_min: int = 5
+    syslog: "SyslogConfig | None" = None    # syslog受信(未設定=無効)
     api_host: str = "127.0.0.1"            # API待受(既定=localhost限定。0.0.0.0でLAN公開)
     api_token: str = ""                    # API接続パスワード(LAN公開時に推奨。空=認証なし)
     api_web_port: int = 0                  # 追加待受ポート(例80)。指定でポート無しURLでも開ける
@@ -83,6 +97,18 @@ class AppConfig:
 
 class ConfigError(Exception):
     pass
+
+
+def _parse_syslog(raw) -> "SyslogConfig | None":
+    if not raw:
+        return None
+    return SyslogConfig(
+        enabled=bool(raw.get("enabled", False)),
+        host=str(raw.get("host", "0.0.0.0")),
+        port=int(raw.get("port", 514)),
+        discord=bool(raw.get("discord", True)),
+        min_severity=int(raw.get("min_severity", 4)),
+    )
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -282,6 +308,7 @@ def load_config(path: str | Path) -> AppConfig:
                      curseforge_api_key=curseforge_api_key,
                      ark_hosts=ark_hosts, ark_steamcmd=raw.get("ark_steamcmd", ""),
                      pal_hosts=pal_hosts, backup=backup, deployment=deployment,
+                     syslog=_parse_syslog(raw.get("syslog")),
                      heartbeat_url=str((raw.get("monitoring") or {}).get(
                          "heartbeat_url", "") or ""),
                      heartbeat_interval_min=int((raw.get("monitoring") or {}).get(

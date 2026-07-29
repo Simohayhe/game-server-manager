@@ -13,7 +13,7 @@ from .runner import PLAYERS_LANE, ark_lane, server_lane
 
 
 def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
-                 recovery=None, history=None, notifier=None) -> Router:
+                 recovery=None, history=None, notifier=None, syslog=None) -> Router:
     r = Router()
     jobs = ctx.jobs
 
@@ -92,6 +92,17 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             "ip_conflicts": (state.meta() or {}).get("ip_conflicts") or [],
         }
     r.add("GET", "/api/health", health)
+
+    def syslog_status(query, **_):
+        """受信したsyslogの状況と直近ログ。ルーターの再起動原因を追う用。"""
+        if syslog is None:
+            return {"enabled": False, "listening": False, "recent": []}
+        limit = _int_arg(query, "limit", 100)
+        sev = _int_arg(query, "min_severity", 7)     # 既定は全部
+        out = syslog.status()
+        out["recent"] = syslog.recent(limit=limit, min_severity=sev)
+        return out
+    r.add("GET", "/api/syslog", syslog_status)
 
     def reload_cfg(**_):
         ctx.reload()

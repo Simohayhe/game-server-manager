@@ -28,6 +28,7 @@ DEFAULT_EVENTS = {
     "dns_down": True,      # DNS障害(名前解決できない=外部参加の生命線)
     "dns_recover": True,   # DNS復旧
     "ip_conflict": True,   # IPアドレス競合(同一IPのVMが両方起動中)
+    "syslog": True,        # 機器(ルーター等)のsyslog。重要度で絞って転送する
     "port": False,         # ポート開閉(既定OFF=うるさいので)
 }
 EVENT_LABELS = {
@@ -37,6 +38,7 @@ EVENT_LABELS = {
     "player_join": "プレイヤー入室", "player_leave": "プレイヤー退室",
     "dns_down": "DNS障害", "dns_recover": "DNS復旧",
     "ip_conflict": "IPアドレス競合",
+    "syslog": "機器ログ(syslog)",
     "port": "ポート開閉",
 }
 

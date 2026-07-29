@@ -39,9 +39,11 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
     sched = SchedulerService(ctx, state=state, notifier=notifier, recovery=rec)
     mon = Monitor(ctx, state, notifier=notifier, on_change=rec.on_change,
                   on_ready=rec.on_ready, history=hist)
+    from core.syslogsrv import SyslogServer
+    syslog = SyslogServer(ctx, notifier=notifier)
     api = ApiServer(build_router(ctx, state, scheduler=sched, dynserve=dyn,
                                  portsync=ports, recovery=rec, history=hist,
-                                 notifier=notifier),
+                                 notifier=notifier, syslog=syslog),
                     port=api_port,
                     host=getattr(ctx.config, "api_host", "127.0.0.1"),
                     token=getattr(ctx.config, "api_token", ""),
@@ -52,7 +54,7 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
     beat = HeartbeatService(ctx)
 
     # 起動順: 配信 → 監視 → 予約 → ポート同期 → 採取 → API(最後=全部揃ってから受付)
-    components = [dyn, mon, sched, ports, sampler, beat, api]
+    components = [dyn, mon, sched, ports, sampler, beat, syslog, api]
 
     # 追加待受(既定80): ブラウザで http://<ホスト>/ とポート無しで開けるようにする。
     # 同じルータ/認証を共有するので、8770と機能・パスワードは同一。
@@ -68,7 +70,8 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
     for c in components:
         svc.add(c)
     svc.ctx_extra = {"state": state, "dyn": dyn, "sched": sched, "api": api,
-                     "ports": ports, "rec": rec, "history": hist, "api_web": api_web}
+                     "ports": ports, "rec": rec, "history": hist, "api_web": api_web,
+                     "syslog": syslog}
 
     # PC再起動後の復帰: 再起動前に動いていたARKマップを起動し直す(VMはHyper-V任せ)。
     # 起動をブロックしないよう別スレッドで。記録が無ければ何もしない。
