@@ -174,6 +174,8 @@ def load_config(path: str | Path) -> AppConfig:
             ssh_user=ssh_raw["user"],
             ssh_password=str(ssh_raw["password"]),
             domain=dns_raw["domain"],
+            publish_external=bool(dns_raw.get("publish_external", False)),
+            auth_port=int(dns_raw.get("auth_port", 5300)),
         )
 
     network = NetworkConfig()

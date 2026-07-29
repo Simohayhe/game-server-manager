@@ -81,6 +81,18 @@ class PortSyncService:
                 label=f"{p.game}-{name}", ext_port=(p.external_port or p.game_port),
                 internal_ip=p.address, internal_port=p.game_port, proto=proto,
                 desired=running))
+        # 自前DNSの外部公開(WAN:53 → ipam:auth_port)。ゲームと違い常時開けておく。
+        # ルーター再起動でUPnP設定が飛んでもここで自動復活する(過去に静かに公開が
+        # 止まってドメインが引けなくなった事故があったため、GSMの管理対象に含める)。
+        dns_cfg = getattr(self.ctx.config, "dns", None)
+        if dns_cfg is not None and getattr(dns_cfg, "publish_external", False):
+            for proto in ("UDP", "TCP"):        # DNSは大きい応答でTCPも使う
+                specs.append(portsync.PortSpec(
+                    label=f"dns-{proto.lower()}", ext_port=53,
+                    internal_ip=dns_cfg.host,
+                    internal_port=int(getattr(dns_cfg, "auth_port", 5300)),
+                    proto=proto, desired=True))
+
         if self.ctx.arkhosts:
             try:
                 host_ip = upnp.local_ip_toward(self.ctx.config.network.gateway)

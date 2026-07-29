@@ -16,6 +16,11 @@ class DnsConfig:
     ssh_user: str
     ssh_password: str
     domain: str          # 例 example.com
+    # 外部公開(自前の権威DNSをWAN:53で公開してドメインを外から引けるようにする)。
+    # 有効にするとGSMのポート同期が WAN:53 → host:auth_port を維持する
+    # (ルーター再起動でUPnP設定が消えても自動で復活する)。
+    publish_external: bool = False
+    auth_port: int = 5300    # 権威pdnsの待受ポート(Recursorと同居のため既定5300)
 
 
 class DnsRegError(Exception):
