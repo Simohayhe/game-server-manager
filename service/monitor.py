@@ -454,11 +454,14 @@ class Monitor:
             return False
         # ログが縮んだ=ARKが起動時に切り詰めた=再起動が起きた → ラッチ解除して起動中に戻す。
         # (監視が「停止の一瞬」を取りこぼしても、これで確実に再起動を検知できる)
+        # サイズ不明(-1=読めなかった)の周期は比較しない。0扱いにすると「縮んだ=再起動」と
+        # 誤検知してラッチが外れ、同じ起動で再起動通知が二重に出てしまう。
         size = ah.log_size()
         prev_size = self._ark_log_size.get(i)
-        if prev_size is not None and size < prev_size:
-            self._ark_ready_latch[i] = False
-        self._ark_log_size[i] = size
+        if size >= 0:
+            if prev_size is not None and prev_size >= 0 and size < prev_size:
+                self._ark_ready_latch[i] = False
+            self._ark_log_size[i] = size
         if self._ark_ready_latch.get(i):
             return True                  # 既に起動完了を確認済み(ラッチ)
         if prev_running is None:

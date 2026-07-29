@@ -18,6 +18,7 @@ from core.paths import app_dir
 CRASHWATCH_PATH = app_dir() / "crashwatch.json"
 MARK_WINDOW_SEC = 1200       # 意図的操作とみなす時間窓(予告カウントダウン最大15分+起動を包含)
 COOLDOWN_SEC = 120           # 復旧の連打防止
+READY_DEDUP_SEC = 300        # 同じ起動の「起動/再起動しました」通知の重複を抑える窓
 
 
 class RecoveryService:
@@ -29,6 +30,7 @@ class RecoveryService:
         self._stop_marks: dict[str, float] = {}
         self._restart_marks: dict[str, float] = {}
         self._last_recover: dict[str, float] = {}
+        self._last_ready: dict[str, float] = {}   # 起動通知の重複防止
 
     @staticmethod
     def _load_enabled() -> bool:
@@ -65,6 +67,13 @@ class RecoveryService:
         『起動しました』通知はプロセス起動時ではなくここで出す。ARKはプロセスが
         立ち上がってから実際に参加可能になるまで数十秒あり、早すぎる通知は誤解を招くため。
         """
+        # 同じ起動で複数回呼ばれても通知は1回だけにする(監視のready判定が一時的に
+        # 揺れると二重に飛ぶため。実際にDiscordへ同じ再起動通知が2回出た事があった)
+        now = time.time()
+        last = self._last_ready.get(key, 0)
+        if now - last < READY_DEDUP_SEC:
+            return
+        self._last_ready[key] = now
         if self._recent(self._restart_marks, key):
             self._notify("restart", f"🔁 {display} を再起動しました", game)
         else:

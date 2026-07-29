@@ -229,11 +229,15 @@ class ArkHost:
         return m.group(1) if m else None
 
     def log_size(self) -> int:
-        """マップ専用ログの現在サイズ(バイト)。再起動検知(切り詰め)に使う。"""
+        """マップ専用ログの現在サイズ(バイト)。再起動検知(切り詰め)に使う。
+
+        取得できなかった時は -1(不明)を返す。0を返すと呼び出し側が「ログが縮んだ
+        =再起動した」と誤検知し、再起動通知が二重に出る不具合があったため。
+        """
         try:
             return self.cfg.log_path.stat().st_size
         except OSError:
-            return 0
+            return -1
 
     def is_advertising(self) -> bool:
         """ログに 'advertising for join'(起動完了の合図)が出ているか。
