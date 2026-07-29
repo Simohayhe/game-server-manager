@@ -9,6 +9,15 @@ _SS = "ServerSettings"
 _GSESS = "/Script/Engine.GameSession"
 
 ARK_SETTINGS_TABS = [
+    ("接続・セキュリティ", [
+        ("gus", _SS, "ServerPassword", "str",
+         "参加パスワード(空=誰でも参加可。設定すると知らない人は入れない)", ""),
+        ("gus", _SS, "SpectatorPassword", "str", "観戦(スペクテイター)パスワード", ""),
+        ("gus", _GSESS, "MaxPlayers", "int", "最大プレイヤー数", "70"),
+        ("gus", _SS, "KickIdlePlayersPeriod", "int", "放置キックまでの秒数(0=無効)", "3600"),
+        ("gus", _SS, "PreventOfflinePvP", "bool", "オフラインPvP保護(ログアウト後は無敵)", "False"),
+        ("gus", _SS, "PreventOfflinePvPInterval", "int", "オフライン保護までの秒数", "900"),
+    ]),
     ("基本・倍率", [
         ("gus", _SS, "XPMultiplier", "float", "経験値(XP)倍率", "1.0"),
         ("gus", _SS, "TamingSpeedMultiplier", "float", "テイム速度倍率(大=速い)", "1.0"),
@@ -259,5 +268,65 @@ ARK_SETTINGS_TABS += [
         ("gus", _SS, "OverrideStructurePlatformPrevention", "bool", "プラットフォーム上の設置制限を解除", "False"),
         ("gus", _SS, "AutoDestroyOldStructuresMultiplier", "float", "古い建築の自動破壊倍率(0=無効)", "0.0"),
         ("gus", _SS, "StructurePreventResourceRadiusMultiplier", "float", "建築が資源湧きを止める範囲倍率", "1.0"),
+    ]),
+]
+
+
+# ---- Minecraft server.properties (日本語) ----
+# 形式は Palworld と同じ (key, type, label, default, choices)。
+# choices は [(値, 表示名), ...] または None。ここに無いキーはダイアログ側の
+# 「その他」タブに動的に出るのでキー欠落は起きない。
+_MC_DIFF = [("peaceful", "ピースフル"), ("easy", "イージー"),
+            ("normal", "ノーマル"), ("hard", "ハード")]
+_MC_MODE = [("survival", "サバイバル"), ("creative", "クリエイティブ"),
+            ("adventure", "アドベンチャー"), ("spectator", "スペクテイター")]
+_MC_LTYPE = [("minecraft:normal", "通常"), ("minecraft:flat", "フラット"),
+             ("minecraft:large_biomes", "大きなバイオーム"),
+             ("minecraft:amplified", "アンプリファイド")]
+
+MC_SETTINGS_TABS = [
+    ("基本", [
+        ("motd", "str", "サーバー説明(MOTD)", "A Minecraft Server", None),
+        ("max-players", "int", "最大プレイヤー数", "20", None),
+        ("difficulty", "choice", "難易度", "easy", _MC_DIFF),
+        ("gamemode", "choice", "ゲームモード", "survival", _MC_MODE),
+        ("force-gamemode", "bool", "参加時にゲームモードを強制", "false", None),
+        ("hardcore", "bool", "ハードコア(死亡でBAN)", "false", None),
+        ("online-mode", "bool", "オンライン認証(プロキシ配下ではfalse)", "true", None),
+    ]),
+    ("ワールド", [
+        ("level-name", "str", "ワールド名(フォルダ)", "world", None),
+        ("level-seed", "str", "シード値(空=ランダム)", "", None),
+        ("level-type", "choice", "地形タイプ", "minecraft:normal", _MC_LTYPE),
+        ("generate-structures", "bool", "構造物を生成", "true", None),
+        ("max-world-size", "int", "ワールド最大サイズ(ブロック)", "29999984", None),
+        ("spawn-protection", "int", "スポーン保護範囲(ブロック)", "16", None),
+    ]),
+    ("プレイヤー・権限", [
+        ("white-list", "bool", "ホワイトリスト有効", "false", None),
+        ("enforce-whitelist", "bool", "ホワイトリストを厳格適用", "false", None),
+        ("op-permission-level", "int", "OP権限レベル(1〜4)", "4", None),
+        ("player-idle-timeout", "int", "放置キック(分・0=無効)", "0", None),
+        ("allow-flight", "bool", "飛行を許可(MOD/エリトラ)", "false", None),
+        ("hide-online-players", "bool", "オンライン一覧を隠す", "false", None),
+        ("enforce-secure-profile", "bool", "署名付きチャットを強制", "true", None),
+    ]),
+    ("パフォーマンス", [
+        ("view-distance", "int", "描画距離(チャンク)", "10", None),
+        ("simulation-distance", "int", "シミュレート距離(チャンク)", "10", None),
+        ("entity-broadcast-range-percentage", "int", "エンティティ表示範囲(%)", "100", None),
+        ("max-tick-time", "int", "最大Tick時間(ms・-1=無効)", "60000", None),
+        ("network-compression-threshold", "int", "ネット圧縮しきい値(byte)", "256", None),
+        ("pause-when-empty-seconds", "int", "無人時に一時停止(秒・0=無効)", "60", None),
+        ("sync-chunk-writes", "bool", "チャンク同期書き込み", "true", None),
+    ]),
+    ("ネットワーク・その他", [
+        ("server-port", "int", "サーバーポート", "25565", None),
+        ("server-ip", "str", "バインドIP(空=全て)", "", None),
+        ("prevent-proxy-connections", "bool", "プロキシ経由接続を拒否", "false", None),
+        ("broadcast-console-to-ops", "bool", "コンソールをOPに通知", "true", None),
+        ("broadcast-rcon-to-ops", "bool", "RCON結果をOPに通知", "true", None),
+        ("require-resource-pack", "bool", "リソースパックを必須にする", "false", None),
+        ("resource-pack", "str", "リソースパックURL", "", None),
     ]),
 ]

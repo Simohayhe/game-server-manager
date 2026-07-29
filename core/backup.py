@@ -20,9 +20,10 @@ import paramiko
 @dataclass
 class BackupConfig:
     path: str = r"C:\GameBackups"
-    keep: int = 10               # ワールド等(大容量)の世代数
+    keep: int = 10               # ワールド等(大容量)の世代数。0=世代数で消さない
     compress: bool = True
     players_keep: int = 60       # プレイヤーデータ(極小)の世代数。keepとは別に多く残す
+    retention_days: int = 0      # 保持期間(日)。この日数より古いBKを消す。0=日数では消さない
 
 
 class BackupError(Exception):
@@ -40,19 +41,80 @@ def _target_dir(cfg: BackupConfig, target: str) -> Path:
 
 
 def _prune(target_dir: Path, prefix: str, keep: int,
-           progress=lambda t: None) -> list[str]:
+           retention_days: int = 0, progress=lambda t: None) -> list[str]:
+    """古いバックアップを剪定する。
+
+    世代数(keep>0)と保持日数(retention_days>0)の両方の条件で判定し、
+    どちらかに引っかかったものを削除する(=より厳しい方が効く)。
+    - keep<=0        : 世代数では消さない
+    - retention_days<=0: 日数では消さない
+    ただし「最新1個」は常に残す(全消しの事故防止)。
+    """
     files = sorted(target_dir.glob(f"{prefix}_*"),
                    key=lambda p: p.stat().st_mtime, reverse=True)
+    now = _dt.datetime.now().timestamp()
+    cutoff = (retention_days * 86400) if retention_days and retention_days > 0 else None
     removed = []
-    for old in files[keep:]:
+    for i, f in enumerate(files):
+        if i == 0:                                   # 最新は必ず残す
+            continue
+        too_many = keep and keep > 0 and i >= keep
         try:
-            old.unlink()
-            removed.append(old.name)
+            too_old = cutoff is not None and (now - f.stat().st_mtime) > cutoff
+        except OSError:
+            too_old = False
+        if not (too_many or too_old):
+            continue
+        try:
+            f.unlink()
+            removed.append(f.name)
         except OSError:
             pass
     if removed:
         progress(f"古い世代を削除: {len(removed)}件")
     return removed
+
+
+def delete_backup(cfg: BackupConfig, file_path: str) -> None:
+    """バックアップファイルを1つ削除する(バックアップ保存先の中に限る=安全確認付き)。"""
+    root = Path(cfg.path).resolve()
+    fp = Path(file_path).resolve()
+    try:
+        fp.relative_to(root)                         # 保存先の外は拒否(誤削除防止)
+    except ValueError:
+        raise BackupError(f"バックアップ保存先の外のファイルは削除できません: {fp}")
+    if not fp.is_file():
+        raise BackupError(f"ファイルが見つかりません: {fp}")
+    if not (fp.suffix == ".zip" or fp.name.endswith(".tar.gz")):
+        raise BackupError(f"バックアップファイルではありません: {fp.name}")
+    fp.unlink()
+
+
+def scan_all(cfg: BackupConfig) -> dict[str, list[dict]]:
+    """保存先を丸ごと走査し、{target: [backups...]} を返す。
+
+    target は list_backups と同じ表記(サーバー名 / "ARK/<map>" / "ARK/_players")。
+    削除済みサーバーの孤児バックアップも拾える。
+    """
+    root = Path(cfg.path)
+    out: dict[str, list[dict]] = {}
+    if not root.exists():
+        return out
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name == "ARK":                      # ARKは1段深い(ARK/<map>)
+            for sub in sorted(entry.iterdir()):
+                if sub.is_dir():
+                    target = f"ARK/{sub.name}"
+                    bks = list_backups(cfg, target)
+                    if bks:
+                        out[target] = bks
+        else:
+            bks = list_backups(cfg, entry.name)
+            if bks:
+                out[entry.name] = bks
+    return out
 
 
 def list_backups(cfg: BackupConfig, target: str) -> list[dict]:
@@ -112,7 +174,7 @@ def ark_backup(saved_root: str | Path, cfg: BackupConfig,
     dest = d / f"{map_label}_{_ts()}.zip"
     progress(f"{map_label}: セーブを圧縮中…(Saved/{save_subdir})")
     n = _zip_subdir(root, save_subdir, dest)
-    _prune(d, map_label, cfg.keep, progress)     # このマップだけで世代管理
+    _prune(d, map_label, cfg.keep, cfg.retention_days, progress)     # このマップだけで世代管理
     progress(f"{map_label}: 完了 {dest.name}({n}ファイル)")
     return str(dest)
 
@@ -157,7 +219,7 @@ def ark_player_backup(entries, cluster_dir: str | Path | None, cfg: BackupConfig
                         pass
     # プレイヤーBKは専用の保持数(players_keep)で剪定する。ワールド用の keep(既定10)を
     # 使うと、手動BKや復元前の安全BKで大量に消えてしまう(実際にそれで50件消えた)。
-    _prune(d, "players", cfg.players_keep if keep is None else keep, progress)
+    _prune(d, "players", cfg.players_keep if keep is None else keep, cfg.retention_days, progress)
     progress(f"プレイヤーデータ: 完了 {dest.name}({n}ファイル)")
     return str(dest)
 
@@ -344,7 +406,7 @@ def mc_backup(profile, cfg: BackupConfig, world: str = "world",
         sftp.close()
     finally:
         client.close()
-    _prune(d, profile.name, cfg.keep, progress)
+    _prune(d, profile.name, cfg.keep, cfg.retention_days, progress)
     progress(f"{profile.display_name}: 完了 {dest.name}")
     return str(dest)
 
@@ -450,7 +512,7 @@ def pal_backup(profile, cfg: BackupConfig, progress=lambda t: None) -> str:
         sftp.close()
     finally:
         client.close()
-    _prune(d, profile.name, cfg.keep, progress)
+    _prune(d, profile.name, cfg.keep, cfg.retention_days, progress)
     progress(f"{profile.display_name}: 完了 {dest.name}")
     return str(dest)
 

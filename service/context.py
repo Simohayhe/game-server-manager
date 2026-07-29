@@ -38,11 +38,41 @@ class Context:
             self.backupcfg: backup_mod.BackupConfig = cfg.backup
             self.ark_steamcmd = getattr(cfg, "ark_steamcmd", "") or ""
             self.arkhosts = [ArkHost(c, self.runner) for c in cfg.ark_hosts]
+            self._apply_ark_event()
             # MC/Palworld は GameServer(profile) が中でSSHを張る(gui/app.py:477 と同じ)
             from core.gameserver import GameServer      # 遅延import(循環回避)
             from core.hyperv import HyperVManager
             self.servers = {p.name: GameServer(p) for p in cfg.servers}
             self.hyperv = HyperVManager(self.runner)
+
+    # ---- ARK季節イベント(-ActiveEvent) ----
+    def ark_event_path(self) -> Path:
+        return app_dir() / "arkevent.json"
+
+    def ark_event(self) -> str:
+        """保存中の季節イベント名(なし="")。"""
+        import json
+        try:
+            return str(json.loads(
+                self.ark_event_path().read_text(encoding="utf-8")).get("event", ""))
+        except (OSError, ValueError):
+            return ""
+
+    def _apply_ark_event(self) -> None:
+        """保存中のイベントを全マップの起動引数フラグに反映(次回起動から効く)。"""
+        ev = self.ark_event()
+        for a in self.arkhosts:
+            a.cfg.active_event = ev
+
+    def set_ark_event(self, event: str) -> str:
+        """イベントを保存し、全マップへ即反映する(再起動は呼び出し側の判断)。"""
+        import json
+        ev = (event or "").strip()
+        self.ark_event_path().write_text(
+            json.dumps({"event": ev}), encoding="utf-8")
+        for a in self.arkhosts:
+            a.cfg.active_event = ev
+        return ev
 
     # ---- 参照ヘルパ ----
     def ark_by_label(self, map_label: str) -> ArkHost | None:

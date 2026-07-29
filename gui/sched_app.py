@@ -196,13 +196,17 @@ class SchedDialog(tk.Toplevel):
         self.b = tk.BooleanVar(value=job["do_backup"] if job else False)
         self.u = tk.BooleanVar(value=job["do_update"] if job else False)
         self.r = tk.BooleanVar(value=job["do_restart"] if job else True)
+        self.rp = tk.BooleanVar(value=job.get("do_respawn", False) if job else False)
         ttk.Checkbutton(af, text="💾 バックアップ", variable=self.b).pack(anchor=tk.W)
         ttk.Checkbutton(af, text="⬆ アップデート(更新があれば適用・ARKのみ)",
                         variable=self.u).pack(anchor=tk.W)
         ttk.Checkbutton(af, text="🔁 再起動", variable=self.r).pack(anchor=tk.W)
+        ttk.Checkbutton(af, text="🦕 湧き直し(DestroyWildDinos・ARK稼働中のみ)",
+                        variable=self.rp).pack(anchor=tk.W)
         ttk.Label(af, foreground=PAL["muted"], justify=tk.LEFT,
-                  text="「バックアップ → 更新 → 再起動」の順。前段が60分を超えたら\n"
-                       "再起動は中止されます(予約時刻から離れた再起動を防ぐため)."
+                  text="「バックアップ → 更新 → 再起動 → 湧き直し」の順。前段が60分を超えたら\n"
+                       "再起動は中止されます。湧き直しは野生恐竜を全消去して再抽選します\n"
+                       "(テイム中の個体も消えるので注意)。定期実行と組合せると1時間毎など可能。"
                   ).pack(anchor=tk.W)
 
         self.rolling = tk.BooleanVar(value=job["rolling"] if job else False)
@@ -251,9 +255,20 @@ class SchedDialog(tk.Toplevel):
                                  parent=self)
             return
         tgt = self.targets[[t[0] for t in self.targets].index(self.tgt.get())]
+        is_host = (tgt[1] == "host")
+        do_b, do_u, do_r, do_rp = (self.b.get(), self.u.get(),
+                                   self.r.get(), self.rp.get())
+        if is_host:                    # PC再起動は「再起動のみ」。他の動作/ローリング/間隔は無視
+            do_b = do_u = do_rp = False
+            do_r = True
+            interval = 0
+        elif not (do_b or do_u or do_r or do_rp):
+            messagebox.showerror("入力エラー",
+                                 "「バックアップ」「更新」「再起動」「湧き直し」の"
+                                 "少なくとも1つを選んでください", parent=self)
+            return
         if interval > 0:
-            times, days = [], []
-            do_b, do_u, do_r = True, False, False
+            times, days = [], []       # 間隔モードは時刻/曜日を使わない
         else:
             times = [t for t in (normalize_time(x)
                                  for x in self.times.get().split(",") if x.strip()) if t]
@@ -264,18 +279,13 @@ class SchedDialog(tk.Toplevel):
                                      parent=self)
                 return
             days = [i for i, v in enumerate(self.days) if v.get()]
-            do_b, do_u, do_r = self.b.get(), self.u.get(), self.r.get()
-            if not (do_b or do_u or do_r):
-                messagebox.showerror("入力エラー",
-                                     "「バックアップ」「更新」「再起動」の少なくとも1つを選んでください",
-                                     parent=self)
-                return
         self.on_ok({
             "id": self.job["id"] if self.job else uuid.uuid4().hex[:8],
             "kind": tgt[1], "target": tgt[2], "display": tgt[3],
             "times": times, "days": days, "enabled": self.enabled.get(),
             "do_backup": do_b, "do_update": do_u, "do_restart": do_r,
-            "rolling": self.rolling.get(),
+            "do_respawn": do_rp,
+            "rolling": False if is_host else self.rolling.get(),
             "order": self.job["order"] if self.job else [],
             "interval_min": interval, "keep": int(keep_raw) if keep_raw else 0,
         })

@@ -45,3 +45,43 @@ def player_names(game: str, raw: str | None) -> list[str] | None:
         tail = m.group(1).strip()
         return [n.strip() for n in tail.split(",") if n.strip()] if tail else []
     return None
+
+
+def player_entries(game: str, raw: str | None) -> list[dict] | None:
+    """接続中プレイヤーを {"name":名前, "id":BAN等に使うID} の一覧で返す。
+
+    id は ARK=EOS ID / Palworld=SteamID / Minecraft=名前(MCは名前でBAN可)。
+    取得できなければ None。BAN/キックの対象指定に使う。
+    """
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text or any(text.startswith(mk) for mk in _FAIL_MARKERS):
+        return None
+
+    if game == "palworld":
+        lines = [l for l in text.splitlines() if l.strip()]
+        if lines and lines[0].lower().startswith("name,"):
+            lines = lines[1:]
+        out = []
+        for l in lines:
+            cols = [c.strip() for c in l.split(",")]
+            if cols and cols[0]:
+                # name,playeruid,steamid の想定。steamid(あれば末尾)をBAN対象IDに。
+                pid = cols[-1] if len(cols) >= 3 and cols[-1] else (
+                    cols[1] if len(cols) >= 2 else cols[0])
+                out.append({"name": cols[0], "id": pid})
+        return out
+
+    if game == "ark":
+        out = []
+        for line in text.splitlines():
+            m2 = re.match(r"^\s*\d+\.\s*(.+),\s*([0-9A-Fa-f]+)\s*$", line)
+            if m2:
+                out.append({"name": m2.group(1).strip(), "id": m2.group(2).strip()})
+        return out
+
+    names = player_names("minecraft", raw)
+    if names is None:
+        return None
+    return [{"name": n, "id": n} for n in names]     # MCは名前でBAN

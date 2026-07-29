@@ -65,9 +65,10 @@ dns:
 # ==== バックアップ ====
 backup:
   path: 'C:\GameBackups'
-  keep: 10                 # ワールド等(大容量)の世代数
+  keep: 10                 # ワールド等(大容量)の世代数。0=世代数では消さない
   players_keep: 60         # プレイヤーデータ(極小)専用の世代数。10分毎の予約なら約10時間ぶん
-  compress: true
+  retention_days: 0        # 保持期間(日)。この日数より古いBKを削除。0=日数では消さない
+  compress: true           # keepとretention_daysは併用可(厳しい方が効く。最新1件は常に残る)
 
 # ==== CurseForge APIキー(任意・mod検索/導入で使用) ====
 # console.curseforge.com の API Keys で無料発行。Modrinthのみ使うなら不要。

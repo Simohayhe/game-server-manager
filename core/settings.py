@@ -46,6 +46,27 @@ def set_ark_display_name(path: str | Path, index: int, name: str) -> None:
         raise SettingsError(f"設定の検証に失敗したため元に戻しました: {exc}") from exc
 
 
+def remove_profile(path: str | Path, name: str) -> None:
+    """servers.<name> を config.yaml から削除する(コメント保持・検証・ロールバック)。"""
+    from .config import load_config  # 循環import回避
+
+    path = Path(path)
+    original = path.read_text(encoding="utf-8")
+    with open(path, encoding="utf-8") as f:
+        data = _yaml.load(f) or {}
+    servers = data.get("servers")
+    if not servers or name not in servers:
+        raise SettingsError(f"サーバー『{name}』が config.yaml にありません")
+    del servers[name]
+    with open(path, "w", encoding="utf-8") as f:
+        _yaml.dump(data, f)
+    try:
+        load_config(path)  # 検証
+    except Exception as exc:
+        path.write_text(original, encoding="utf-8")  # ロールバック
+        raise SettingsError(f"設定の検証に失敗したため元に戻しました: {exc}") from exc
+
+
 def update_config(path: str | Path, updates: dict) -> None:
     """指定セクションの値を更新して保存する(コメント保持・検証・ロールバック付き)。
 

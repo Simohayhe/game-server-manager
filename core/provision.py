@@ -142,3 +142,48 @@ def append_profile_to_config(config_path: str | Path, name: str, profile: dict) 
     except Exception:
         path.write_text(original, encoding="utf-8")  # ロールバック
         raise
+
+
+def _fetch_json(url: str):
+    import json
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "game-server-manager"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.load(r)
+
+
+def available_versions(template_id: str) -> list[str]:
+    """種別(テンプレ)ごとに、選択可能なMCバージョン一覧を新しい順で返す。
+
+    - fabric : Fabric公式が対応するstable版(Fabric Meta)
+    - vanilla: Mojang公式リリース版(version_manifest)
+    - forge  : Forgeが配布しているMC版(promotions_slim)
+    取得失敗時は空リスト(GUIは自由入力にフォールバック)。
+    """
+    try:
+        if template_id == "minecraft_fabric":
+            data = _fetch_json("https://meta.fabricmc.net/v2/versions/game")
+            return [v["version"] for v in data if v.get("stable")]
+        if template_id == "minecraft_vanilla":
+            m = _fetch_json(
+                "https://launchermeta.mojang.com/mc/game/version_manifest_v2.json")
+            return [v["id"] for v in m.get("versions", []) if v.get("type") == "release"]
+        if template_id == "minecraft_forge":
+            p = _fetch_json(
+                "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json")
+            seen, out = set(), []
+            for key in p.get("promos", {}):
+                mc = key.rsplit("-", 1)[0]
+                if mc and mc not in seen:
+                    seen.add(mc)
+                    out.append(mc)
+
+            def _vkey(v):
+                parts = []
+                for x in v.split("."):
+                    parts.append(int(x) if x.isdigit() else 0)
+                return parts
+            return sorted(out, key=_vkey, reverse=True)
+    except Exception:
+        return []
+    return []

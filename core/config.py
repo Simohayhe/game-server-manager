@@ -248,6 +248,7 @@ def load_config(path: str | Path) -> AppConfig:
             keep=int(bk_raw.get("keep", 10)),
             compress=bool(bk_raw.get("compress", True)),
             players_keep=int(bk_raw.get("players_keep", 60)),
+            retention_days=int(bk_raw.get("retention_days", 0)),
         )
 
     cf_raw = raw.get("curseforge") or {}

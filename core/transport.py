@@ -39,6 +39,47 @@ def _encode_ps(script: str) -> str:
     return base64.b64encode((_PS_UTF8 + script).encode("utf-16-le")).decode("ascii")
 
 
+def clean_ps_stderr(text: str) -> str:
+    """PowerShellのstderr(CLIXML)を人間が読めるエラーメッセージに整形する。
+
+    -NonInteractive のPowerShellはエラーを CLIXML(XML) で吐くため、生のままだと
+    `#< CLIXML <Objs ...>` の巨大なXMLがGUIに出てしまう。<S S="Error"> の中身だけを
+    取り出し、進捗レコードやスタック情報を落として先頭の要点だけ返す。
+    """
+    if "#< CLIXML" not in text:
+        return text.strip()
+    import html
+    import re
+    msgs = re.findall(r'<S S="Error">(.*?)</S>', text, re.S)
+    joined = "".join(msgs)
+    joined = joined.replace("_x000D__x000A_", "\n")
+    # CLIXMLの _xHHHH_ エスケープ(改行/アンダースコア等)を汎用デコード
+    joined = re.sub(r"_x([0-9A-Fa-f]{4})_",
+                    lambda m: chr(int(m.group(1), 16)), joined)
+    joined = joined.replace("\r", "")
+    joined = html.unescape(joined)
+    drop = ("CategoryInfo", "FullyQualifiedErrorId", "PSComputerName",
+            "At line:", "+ ", "~")
+    lines = []
+    for ln in joined.splitlines():
+        ln = ln.strip()
+        if not ln or any(ln.startswith(d) for d in drop):
+            continue
+        ln = re.sub(r"\(?仮想マシン ID [0-9A-Fa-f-]+\)?", "", ln).strip()
+        if ln:
+            lines.append(ln)
+    # ほぼ同じ内容の繰り返しを除去し、先頭の要点だけに絞る
+    seen, out = set(), []
+    for ln in lines:
+        key = re.sub(r"[^ぁ-んァ-ン一-龥A-Za-z0-9]", "", ln)[:40]
+        if key not in seen:
+            seen.add(key)
+            out.append(ln)
+        if len(out) >= 3:
+            break
+    return "\n".join(out) or text.strip()[:300]
+
+
 class LocalPowerShell:
     """このPC上でPowerShellを実行する(hyperv.mode: local 用)。"""
 
@@ -54,7 +95,7 @@ class LocalPowerShell:
         return CommandResult(
             proc.returncode,
             proc.stdout.decode("utf-8", "replace"),
-            proc.stderr.decode("utf-8", "replace"),
+            clean_ps_stderr(proc.stderr.decode("utf-8", "replace")),
         )
 
     def close(self) -> None:
@@ -114,7 +155,8 @@ class SSHTransport:
     def run_ps(self, script: str, timeout: float = 60) -> CommandResult:
         """Windowsホスト上でPowerShellを実行する(デフォルトシェルがcmdでも動く)。"""
         cmd = f"powershell -NoProfile -NonInteractive -EncodedCommand {_encode_ps(script)}"
-        return self.run(cmd, timeout=timeout)
+        r = self.run(cmd, timeout=timeout)
+        return CommandResult(r.returncode, r.stdout, clean_ps_stderr(r.stderr))
 
     def close(self) -> None:
         with self._lock:

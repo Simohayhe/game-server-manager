@@ -85,6 +85,7 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             "servers": len(ctx.servers),
             "state_age_sec": round(state.age(), 1),
             "busy_lanes": jobs.busy_lanes(),
+            "ip_conflicts": (state.meta() or {}).get("ip_conflicts") or [],
         }
     r.add("GET", "/api/health", health)
 
@@ -118,6 +119,48 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         return {"ark": out, "latest_build": state.meta().get("latest_build")}
     r.add("GET", "/api/ark", ark_list)
 
+    # ---------------- プレイヤー(接続中の名前一覧) ----------------
+    def players_all(**_):
+        """全サーバー(MC/Palworld/ARK各マップ)の接続中プレイヤー名をまとめて返す。
+
+        監視キャッシュの players(RCON生出力)を core.players.player_names で名前に変換。
+        追加のRCONは叩かない(監視が更新済みのものを使う)。
+        """
+        from core.players import player_entries
+        groups = []
+        total = 0
+        for name, srv in ctx.servers.items():
+            cached = state.server_one(name) or {}
+            running = cached.get("status") == "active"
+            entries = player_entries(srv.profile.game, cached.get("players")) if running else None
+            cnt = len(entries) if entries is not None else cached.get("player_count")
+            if entries:
+                total += len(entries)
+            groups.append({
+                "kind": srv.profile.game, "id": name,
+                "display": srv.profile.display_name, "running": bool(running),
+                "ready": bool(running), "known": entries is not None,
+                "count": cnt, "players": [e["name"] for e in (entries or [])],
+                "entries": entries or [],
+            })
+        for i, ah in enumerate(ctx.arkhosts):
+            cached = state.ark_one(i) or {}
+            running = bool(cached.get("running"))
+            ready = bool(cached.get("ready"))
+            entries = player_entries("ark", cached.get("players")) if ready else None
+            cnt = len(entries) if entries is not None else cached.get("player_count")
+            if entries:
+                total += len(entries)
+            groups.append({
+                "kind": "ark", "id": f"ark:{i}",
+                "display": ah.cfg.display_name, "running": running,
+                "ready": ready, "known": entries is not None,
+                "count": cnt, "players": [e["name"] for e in (entries or [])],
+                "entries": entries or [],
+            })
+        return {"groups": groups, "total": total}
+    r.add("GET", "/api/players", players_all)
+
     def _ark(params):
         ah = ctx.ark_by_index(int(params["idx"]))
         if ah is None:
@@ -135,6 +178,9 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
     def ark_stop(params, **_):
         ah = _ark(params)
         mark("stop", f"ark:{int(params['idx'])}")     # 意図的な停止=復旧させない
+        # 進行中の起動待ち/再起動カウントダウンを即中断させる(同レーンで順番待ちに
+        # ならないよう、ジョブ投入前に同期でフラグを立てる)=「起動中に停止」対応。
+        ah.request_cancel()
         t = jobs.submit(f"🦖 停止: {ah.cfg.display_name}",
                         lambda: (ah.stop_with_notice(progress=jobs.progress), "stopped")[1],
                         lane=ark_lane(ah.cfg.map_label), category="ARK操作")
@@ -182,6 +228,52 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         except Exception as exc:
             raise ApiError(502, f"RCON失敗: {exc}") from exc
     r.add("POST", r"/api/ark/(?P<idx>\d+)/rcon", ark_rcon)
+
+    def ark_moderate(params, body, **_):
+        """ARKのBAN/キック/BAN解除/許可リスト。停止中はBanList.txtを直接編集。"""
+        from core import moderation as M
+        ah = _ark(params)
+        b = body or {}
+        action = (b.get("action") or "").strip()
+        target = (b.get("target") or "").strip()
+        try:
+            running = ah.is_running()
+        except Exception:
+            running = False
+        if action == "banlist":                       # 一覧はファイルから(停止中でも可)
+            return {"banned": M.ark_banlist_read(ah.cfg.install_root), "running": running}
+        if action in ("kick", "ban", "unban", "wl_add", "wl_remove") and not target:
+            raise ApiError(400, "対象(EOS ID/名前)を指定してください")
+        if not running and action in ("ban", "unban"):   # オフライン=ファイル編集
+            try:
+                if action == "ban":
+                    M.ark_ban_offline(ah.cfg.install_root, target)
+                    msg = f"{target} をBANしました(BanList.txtへ追記・次回起動で反映)"
+                else:
+                    M.ark_unban_offline(ah.cfg.install_root, target)
+                    msg = f"{target} のBANを解除しました(BanList.txtから削除)"
+            except M.ModerationError as exc:
+                raise ApiError(400, str(exc))
+            return {"ok": True, "offline": True, "message": msg}
+        if not running:
+            raise ApiError(409, "この操作にはマップの起動が必要です(停止中はBAN/解除のみ可)")
+        try:
+            cmd = M.ark_rcon_command(action, target)
+        except M.ModerationError as exc:
+            raise ApiError(400, str(exc))
+        try:
+            resp = ah.rcon_command(cmd)
+        except Exception as exc:
+            raise ApiError(502, f"RCON失敗: {exc}") from exc
+        try:                                           # BanList.txtにも反映(一覧整合)
+            if action == "ban":
+                M.ark_ban_offline(ah.cfg.install_root, target)
+            elif action == "unban":
+                M.ark_unban_offline(ah.cfg.install_root, target)
+        except Exception:
+            pass
+        return {"ok": True, "offline": False, "response": resp}
+    r.add("POST", r"/api/ark/(?P<idx>\d+)/moderate", ark_moderate)
 
     # クイック操作(保存/リスポーン/昼夜)をタスクとして実行し、画面の📋タスクに残す。
     _ARK_QUICK = {
@@ -272,6 +364,44 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             game.save()
         return {"ok": True, "applied": len(seen), "changed": len(changes)}
     r.add("POST", "/api/ark/settings", ark_settings_set)
+
+    def ark_mapsettings_get(params, **_):
+        """マップ固有設定(例 Ragnarokの火山)を、そのマップのconfigから読む。"""
+        from core import arkconfig
+        ah = _ark(params)
+        spec = arkconfig.ARK_MAP_SETTINGS.get(ah.cfg.map_label)
+        if not spec:
+            return {"map_label": ah.cfg.map_label, "section": None, "settings": []}
+        gus, _game = arkconfig.load(ah.cfg.config_dir)
+        section = spec["section"]
+        out = []
+        for key, typ, label, default in spec["items"]:
+            cur = gus.get(section, key)
+            out.append({"key": key, "type": typ, "label": label,
+                        "default": default,
+                        "current": cur if cur is not None else ""})
+        return {"map_label": ah.cfg.map_label, "section": section, "settings": out}
+    r.add("GET", r"/api/ark/(?P<idx>\d+)/mapsettings", ark_mapsettings_get)
+
+    def ark_mapsettings_set(params, body, **_):
+        """マップ固有設定を、そのマップのconfigにだけ書く(全マップには広げない)。"""
+        from core import arkconfig
+        ah = _ark(params)
+        spec = arkconfig.ARK_MAP_SETTINGS.get(ah.cfg.map_label)
+        if not spec:
+            raise ApiError(400, f"{ah.cfg.display_name} に固有設定はありません")
+        changes = (body or {}).get("changes") or {}      # {key: value}
+        section = spec["section"]
+        valid = {k for k, _t, _l, _d in spec["items"]}
+        gus, _game = arkconfig.load(ah.cfg.config_dir)
+        n = 0
+        for key, val in changes.items():
+            if key in valid:
+                gus.set(section, key, str(val))
+                n += 1
+        gus.save()
+        return {"ok": True, "changed": n, "map_label": ah.cfg.map_label}
+    r.add("POST", r"/api/ark/(?P<idx>\d+)/mapsettings", ark_mapsettings_set)
 
     def ark_backups(params, **_):
         ah = _ark(params)
@@ -412,6 +542,35 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
     def ark_behavior_get(**_):
         return {"respawn_on_restart": _respawn_flag()}
     r.add("GET", "/api/ark/behavior", ark_behavior_get)
+
+    # ARK季節イベント。ASAはイベントを公式Mod(CurseForge/StudioWildcard)で配布するので、
+    # -ActiveEvent ではなく -mods=<ID> で有効化する(arkhost.EVENT_MODS/merge_mods)。
+    # value は EVENT_MODS のキーと一致させること。設定のみ=次回GSM起動時に全マップへ反映。
+    ARK_EVENTS = [
+        {"value": "",                 "label": "なし(通常)"},
+        {"value": "Summer",           "label": "Summer Bash(夏)"},
+        {"value": "WinterWonderland", "label": "Winter Wonderland(冬)"},
+        {"value": "FearEvolved",      "label": "Fear Ascended(ハロウィン)"},
+        {"value": "Love",             "label": "Love Ascended(バレンタイン)"},
+        {"value": "Easter",           "label": "Eggcellent Adventure(イースター)"},
+        {"value": "TurkeyTrial",      "label": "Turkey Trial(感謝祭)"},
+    ]
+    ARK_EVENT_NOTE = (
+        "ASAのイベントは公式Mod(CurseForge)で有効化します。設定すると、そのイベントの"
+        "Mod IDを全マップの -mods= に追加します(Astraeos等の既存Modは保持)。"
+        "反映は次回のGSM起動時で、初回はサーバーがMODをダウンロードするぶん起動が長くなります"
+        "(参加プレイヤー側も自動DL)。イベント色は『新しく湧いた野生恐竜』にだけ付くので、"
+        "起動後に『🦕 野生恐竜を今すぐリスポーン(DestroyWildDinos)』を実行すると色が付きます。")
+
+    def ark_event_get(**_):
+        return {"event": ctx.ark_event(), "choices": ARK_EVENTS,
+                "note": ARK_EVENT_NOTE}
+    r.add("GET", "/api/ark/event", ark_event_get)
+
+    def ark_event_set(body, **_):
+        ev = ctx.set_ark_event(str((body or {}).get("event", "")))
+        return {"event": ev}
+    r.add("POST", "/api/ark/event", ark_event_set)
 
     def ark_behavior_set(body, **_):
         import json as _json
@@ -560,6 +719,13 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             for t in prov.load_templates()]}
     r.add("GET", "/api/provision/templates", provision_templates)
 
+    def provision_versions(query, **_):
+        from urllib.parse import parse_qs
+        tid = (parse_qs(query or "").get("template") or [""])[0]
+        from core import provision as prov
+        return {"versions": prov.available_versions(tid)}
+    r.add("GET", "/api/provision/versions", provision_versions)
+
     def provision_new(body, **_):
         """既存VM(SSH到達可)に指定バージョンのサーバーを構築し、config追記＋反映する。
 
@@ -602,7 +768,34 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         display = b.get("display_name") or name
         vm = (b.get("vm") or "").strip()
 
+        # VMも新規に作る場合(テンプレからクローン→個体化してから構築)
+        create_vm = bool(b.get("create_vm"))
+        vm_template = (b.get("vm_template") or "ubuntu_template").strip()
+        template_ip = (b.get("template_ip") or "192.168.11.199").strip()
+        try:
+            new_mem_mb = int(float(b.get("vm_memory_gb") or 4) * 1024)
+            new_cpu = int(b.get("vm_cpu") or 4)
+        except (TypeError, ValueError):
+            raise ApiError(400, "VMのメモリ/CPUは数値で指定してください")
+        if create_vm and not vm:
+            raise ApiError(400, "VMを新規作成する場合はVM名が必要です")
+
         def fn():
+            if create_vm:
+                from core import orchestration as orch
+                net = getattr(ctx.config, "network", None)
+                new_ip = net.full_ip(host) if net else host
+                gateway = net.gateway if net else "192.168.11.1"
+                dns = (ctx.config.dns.host if getattr(ctx.config, "dns", None)
+                       else "192.168.11.254")
+                jobs.progress(f"{vm_template} を {vm} に複製中…")
+                ctx.hyperv.clone_vm(vm_template, vm, new_mem_mb, new_cpu)
+                jobs.progress(f"{vm} を起動→SSH応答待ち({template_ip})…")
+                ctx.hyperv.start_vm(vm)
+                orch._wait_for_port(template_ip, 22, timeout=240)
+                jobs.progress(f"個体化(hostname={vm} / IP={new_ip})…再起動します")
+                orch.individualize_clone(template_ip, ssh_user, ssh_pass, vm,
+                                         new_ip, gateway, dns, progress=jobs.progress)
             jobs.progress(f"{host} に {t.display_name} {version} を構築開始…")
             prov.provision(host, ssh_user, ssh_pass, script, progress=jobs.progress)
             profile: dict = {"display_name": display}
@@ -618,6 +811,16 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
                 "version_pattern": t.profile_extra.get("version_pattern"),
                 "players_pattern": t.profile_extra.get("players_pattern"),
             })
+            # LAN内DNSへA/PTRを自動登録(設定がある時)。fqdnをプロファイルに保存。
+            # 失敗しても構築は成功扱い(名前解決はIP直で代替できるため)。
+            if getattr(ctx.config, "dns", None) is not None:
+                try:
+                    from core import dnsreg
+                    fqdn = dnsreg.register_host(ctx.config.dns, vm or name, host,
+                                                progress=jobs.progress)
+                    profile["fqdn"] = fqdn
+                except Exception as exc:
+                    jobs.progress(f"DNS登録に失敗(続行・IP直で利用可): {exc}")
             prov.append_profile_to_config(ctx.config_path, name, profile)
             ctx.reload()                             # 稼働中サービスに即反映
             return f"{display}({version}) を構築し、一覧に追加しました"
@@ -700,6 +903,33 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             raise ApiError(502, f"RCON失敗: {exc}") from exc
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/rcon", server_rcon)
 
+    def server_moderate(params, body, **_):
+        """MC/PalworldのBAN/キック/BAN解除/ホワイトリスト(RCON)。要サーバー起動。"""
+        from core import moderation as M
+        srv = _srv(params)
+        game = srv.profile.game
+        b = body or {}
+        action = (b.get("action") or "").strip()
+        target = (b.get("target") or "").strip()
+        reason = (b.get("reason") or "").strip()
+        try:
+            if game == "minecraft":
+                cmd = M.mc_command(action, target, reason)
+            elif game == "palworld":
+                cmd = M.pal_command(action, target)
+            else:
+                raise ApiError(400, "このサーバーでは未対応です")
+        except M.ModerationError as exc:
+            raise ApiError(400, str(exc))
+        if action not in ("banlist", "wl_list", "wl_on", "wl_off") and not target:
+            raise ApiError(400, "対象を指定してください")
+        try:
+            resp = srv.rcon_command(cmd)
+        except Exception as exc:
+            raise ApiError(502, f"RCON失敗(サーバーが起動しているか確認): {exc}") from exc
+        return {"ok": True, "command": cmd, "response": resp}
+    r.add("POST", r"/api/servers/(?P<name>[^/]+)/moderate", server_moderate)
+
     def server_publish(params, body, **_):
         """MC/Palworldを外部公開(UPnP転送 + DNS)。unpublish=Trueで停止。"""
         srv = _srv(params)
@@ -726,9 +956,13 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
     def server_backup(params, **_):
         srv = _srv(params)
         fn = backup.pal_backup if srv.profile.game == "palworld" else backup.mc_backup
-        t = jobs.submit(f"💾 バックアップ: {srv.profile.display_name}",
-                        lambda: fn(srv.profile, ctx.backupcfg, progress=jobs.progress),
-                        lane=server_lane(params["name"]), category="バックアップ")
+        t = jobs.submit(
+            f"💾 バックアップ: {srv.profile.display_name}",
+            lambda: _with_vm_ssh(
+                srv.profile,
+                lambda: fn(srv.profile, ctx.backupcfg, progress=jobs.progress),
+                jobs.progress),
+            lane=server_lane(params["name"]), category="バックアップ")
         return {"task_id": t.id}
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/backup", server_backup)
 
@@ -743,10 +977,233 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         def fn():
             rest(srv.profile, f, progress=jobs.progress)
             return "復元しました"
-        t = jobs.submit(f"↩ 復元: {srv.profile.display_name}", fn,
+        t = jobs.submit(f"↩ 復元: {srv.profile.display_name}",
+                        lambda: _with_vm_ssh(srv.profile, fn, jobs.progress),
                         lane=server_lane(params["name"]), category="復元")
         return {"task_id": t.id}
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/restore", server_restore)
+
+    # ------------------------------------------------------------------
+    # バックアップ統合管理(ゲーム別セクション・世代/日数保持・削除)
+    # ------------------------------------------------------------------
+    def _profile_by_name(name):
+        srv = ctx.servers.get(name)
+        return srv.profile if srv else None
+
+    def _ark_idx_by_label(label):
+        for i, a in enumerate(ctx.arkhosts):
+            if a.cfg.map_label == label:
+                return i, a
+        return None, None
+
+    def _bk_meta(target):
+        """target(保存先のサブパス表記) から {game, display, kind, idx?} を求める。"""
+        if target == "ARK/_players":
+            return {"game": "ark", "display": "プレイヤーデータ(全マップ)",
+                    "kind": "players", "idx": None}
+        if target.startswith("ARK/"):
+            label = target.split("/", 1)[1]
+            i, a = _ark_idx_by_label(label)
+            disp = a.cfg.display_name if a else label
+            return {"game": "ark", "display": disp, "kind": "world", "idx": i}
+        prof = _profile_by_name(target)
+        if prof:
+            return {"game": prof.game, "display": prof.display_name,
+                    "kind": "world", "idx": None}
+        return {"game": "other", "display": target, "kind": "world", "idx": None}
+
+    def backups_all(**_):
+        """保存先を丸ごと走査し、ゲーム別に整理して返す。"""
+        scanned = backup.scan_all(ctx.backupcfg)
+        targets = []
+        for target, bks in scanned.items():
+            meta = _bk_meta(target)
+            targets.append({
+                "target": target, "display": meta["display"], "game": meta["game"],
+                "kind": meta["kind"], "idx": meta.get("idx"), "count": len(bks),
+                "total_mb": round(sum(b["size_mb"] for b in bks), 1),
+                "backups": bks,
+            })
+        targets.sort(key=lambda t: (t["game"], t["display"].lower()))
+        return {"targets": targets}
+    r.add("GET", "/api/backups", backups_all)
+
+    def backup_delete(body, **_):
+        f = (body or {}).get("file")
+        if not f:
+            raise ApiError(400, "削除するバックアップ(file)を指定してください")
+        try:
+            backup.delete_backup(ctx.backupcfg, f)
+        except backup.BackupError as exc:
+            raise ApiError(400, str(exc))
+        return {"deleted": f}
+    r.add("POST", "/api/backups/delete", backup_delete)
+
+    def backup_restore_any(body, **_):
+        """target 種別に応じて適切な復元を行う(統合管理画面用)。"""
+        b = body or {}
+        target = b.get("target")
+        f = b.get("file")
+        if not target or not f:
+            raise ApiError(400, "target と file を指定してください")
+        if target == "ARK/_players":
+            label_to_root = {a.cfg.map_label: str(backup.ark_saved_dir(a.cfg.config_dir))
+                             for a in ctx.arkhosts}
+            cluster = ctx.ark_cluster_dir()
+
+            def fn():
+                n = backup.ark_player_restore(f, label_to_root, cluster,
+                                              progress=jobs.progress)
+                return f"復元しました({n}ファイル)"
+            t = jobs.submit("↩ プレイヤーデータ復元", fn,
+                            lane=PLAYERS_LANE, category="復元")
+            return {"task_id": t.id}
+        if target.startswith("ARK/"):
+            label = target.split("/", 1)[1]
+            idx, ah = _ark_idx_by_label(label)
+            if ah is None:
+                raise ApiError(404, f"ARKマップ '{label}' が見つかりません")
+            if ah.is_running():
+                raise ApiError(409, "復元前にこのマップを停止してください")
+
+            def fn():
+                backup.ark_restore(f, str(backup.ark_saved_dir(ah.cfg.config_dir)),
+                                   progress=jobs.progress)
+                return "復元しました"
+            t = jobs.submit(f"↩ 復元: {ah.cfg.display_name}", fn,
+                            lane=ark_lane(ah.cfg.map_label), category="復元")
+            return {"task_id": t.id}
+        prof = _profile_by_name(target)
+        if not prof:
+            raise ApiError(404, f"サーバー '{target}' が見つかりません(削除済み?)")
+        srv = ctx.servers[target]
+        rest = backup.pal_restore if prof.game == "palworld" else backup.mc_restore
+        mark("restart", f"mc:{target}")
+
+        def fn():
+            rest(prof, f, progress=jobs.progress)
+            return "復元しました"
+        t = jobs.submit(f"↩ 復元: {prof.display_name}",
+                        lambda: _with_vm_ssh(prof, fn, jobs.progress),
+                        lane=server_lane(target), category="復元")
+        return {"task_id": t.id}
+    r.add("POST", "/api/backups/restore", backup_restore_any)
+
+    def backup_settings_get(**_):
+        c = ctx.backupcfg
+        return {"path": c.path, "keep": c.keep, "players_keep": c.players_keep,
+                "retention_days": c.retention_days, "compress": c.compress}
+    r.add("GET", "/api/backups/settings", backup_settings_get)
+
+    def backup_settings_set(body, **_):
+        b = body or {}
+        upd = {}
+        for k in ("path", "keep", "players_keep", "retention_days", "compress"):
+            if k in b and b[k] is not None:
+                upd[k] = b[k]
+        if not upd:
+            raise ApiError(400, "変更する項目がありません")
+        for k in ("keep", "players_keep", "retention_days"):   # 数値は非負整数に
+            if k in upd:
+                try:
+                    upd[k] = max(0, int(upd[k]))
+                except (TypeError, ValueError):
+                    raise ApiError(400, f"{k} は整数で指定してください")
+        from core import settings
+        settings.update_config(ctx.config_path, {"backup": upd})
+        ctx.reload()
+        return {"saved": upd}
+    r.add("POST", "/api/backups/settings", backup_settings_set)
+
+    # ------------------------------------------------------------------
+    # 設定のエクスポート/インポート(暗号化対応)
+    # ------------------------------------------------------------------
+    def config_export(body, **_):
+        import base64 as _b64
+        from core import configio
+        from core.paths import app_dir as _ad
+        b = body or {}
+        with_secrets = bool(b.get("with_secrets", True))
+        password = str(b.get("password") or "")
+        try:
+            data, fname = configio.export_bundle(
+                _ad(), with_secrets=with_secrets, password=password)
+        except configio.ConfigIOError as exc:
+            raise ApiError(400, str(exc))
+        return {"filename": fname, "encrypted": bool(password),
+                "data": _b64.b64encode(data).decode("ascii")}
+    r.add("POST", "/api/config/export", config_export)
+
+    def config_peek(body, **_):
+        import base64 as _b64
+        from core import configio
+        b = body or {}
+        try:
+            blob = _b64.b64decode(b.get("data") or "")
+        except Exception:
+            raise ApiError(400, "データを読み取れませんでした")
+        enc = configio.is_encrypted(blob)
+        if enc and not b.get("password"):
+            return {"encrypted": True, "need_password": True}
+        try:
+            manifest = configio.peek(blob, str(b.get("password") or ""))
+        except configio.ConfigIOError as exc:
+            raise ApiError(400, str(exc))
+        return {"encrypted": enc, "need_password": False, "manifest": manifest}
+    r.add("POST", "/api/config/peek", config_peek)
+
+    def config_import(body, **_):
+        import base64 as _b64
+        from core import configio
+        from core.paths import app_dir as _ad
+        b = body or {}
+        try:
+            blob = _b64.b64decode(b.get("data") or "")
+        except Exception:
+            raise ApiError(400, "データを読み取れませんでした")
+
+        def job():
+            try:
+                return configio.import_bundle(
+                    _ad(), blob, str(b.get("password") or ""),
+                    progress=jobs.progress)
+            except configio.ConfigIOError as exc:
+                raise ApiError(400, str(exc))
+            finally:
+                try:
+                    ctx.reload()
+                except Exception:
+                    pass
+        t = jobs.submit("⬇ 設定をインポート", job, category="設定")
+        return {"task_id": t.id}
+    r.add("POST", "/api/config/import", config_import)
+
+    # ---------------- ホストPCの再起動(再起動後に元へ復帰) ----------------
+    import threading as _threading
+    _host_restart_cancel = _threading.Event()
+
+    def host_restart(body, **_):
+        """予告→カウントダウン(取消可)→ARK保存停止→PC再起動。VMはHyper-Vが自動復帰。"""
+        from core import hostpower
+        b = body or {}
+        try:
+            delay = max(0, int(b.get("delay_sec", 60)))
+        except (TypeError, ValueError):
+            raise ApiError(400, "delay_sec は数値で指定してください")
+        _host_restart_cancel.clear()
+
+        def job():
+            return hostpower.restart_host(
+                ctx, delay_sec=delay, progress=jobs.progress,
+                is_cancelled=_host_restart_cancel.is_set)
+        t = jobs.submit("🖥 PC再起動", job, category="ホスト")
+        return {"task_id": t.id}
+    r.add("POST", "/api/host/restart", host_restart)
+
+    def host_restart_cancel(**_):
+        _host_restart_cancel.set()
+        return {"cancelled": True}
+    r.add("POST", "/api/host/restart/cancel", host_restart_cancel)
 
     def server_reset_world(params, body, **_):
         """MCのワールドをリセット(削除→再生成)。既定でリセット前に自動バックアップ。
@@ -789,7 +1246,7 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             raise ApiError(400, "Palworldのみ対応です")
         from core import palconfig
         try:
-            opts = palconfig.read(srv.profile)
+            opts = _with_vm_ssh(srv.profile, lambda: palconfig.read(srv.profile))
         except Exception as exc:
             raise ApiError(502, f"設定の取得に失敗: {exc}") from exc
         keys = [k for k in (query or "").split(",") if k]
@@ -813,7 +1270,8 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
                 opts.set(k, str(v))
             palconfig.write(srv.profile, opts, restart=restart, progress=jobs.progress)
             return f"{len(changes)}項目を保存"
-        t = jobs.submit(f"⚙ 設定保存: {srv.profile.display_name}", fn,
+        t = jobs.submit(f"⚙ 設定保存: {srv.profile.display_name}",
+                        lambda: _with_vm_ssh(srv.profile, fn, jobs.progress),
                         lane=server_lane(params["name"]), category="設定変更")
         return {"task_id": t.id}
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/palconfig", server_palconfig_set)
@@ -828,7 +1286,8 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             raise ApiError(400, "Mod管理はMinecraftのみ対応です")
         from core import modmanager
         try:
-            return {"mods": modmanager.list_installed_meta(srv.profile)}
+            return {"mods": _with_vm_ssh(
+                srv.profile, lambda: modmanager.list_installed_meta(srv.profile))}
         except Exception as exc:
             raise ApiError(502, f"Mod一覧の取得に失敗: {exc}") from exc
     r.add("GET", r"/api/servers/(?P<name>[^/]+)/mods", mods_list)
@@ -867,7 +1326,8 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             entries = list(plan.values())     # 本体＋必須依存
             return modmanager.install_online(srv.profile, entries, restart=restart,
                                              progress=jobs.progress)
-        t = jobs.submit(f"🧩 Mod導入: {srv.profile.display_name}", fn,
+        t = jobs.submit(f"🧩 Mod導入: {srv.profile.display_name}",
+                        lambda: _with_vm_ssh(srv.profile, fn, jobs.progress),
                         lane=server_lane(params["name"]), category="Mod管理")
         return {"task_id": t.id}
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/mods/install", mods_install)
@@ -879,11 +1339,14 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         restart = bool(body.get("restart", True))
         if not names:
             raise ApiError(400, "削除するmod(names)を指定してください")
-        t = jobs.submit(f"🧩 Mod削除: {srv.profile.display_name}",
-                        lambda: modmanager.remove_mods(srv.profile, names,
-                                                       restart=restart,
-                                                       progress=jobs.progress),
-                        lane=server_lane(params["name"]), category="Mod管理")
+        t = jobs.submit(
+            f"🧩 Mod削除: {srv.profile.display_name}",
+            lambda: _with_vm_ssh(
+                srv.profile,
+                lambda: modmanager.remove_mods(srv.profile, names, restart=restart,
+                                               progress=jobs.progress),
+                jobs.progress),
+            lane=server_lane(params["name"]), category="Mod管理")
         return {"task_id": t.id}
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/mods/remove", mods_remove)
 
@@ -894,19 +1357,53 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         if not mcver:
             raise ApiError(400, "mcver が必要です")
         try:
-            return {"updates": modmanager.check_updates_modrinth(srv.profile, mcver)}
+            return {"updates": _with_vm_ssh(
+                srv.profile,
+                lambda: modmanager.check_updates_modrinth(srv.profile, mcver))}
         except Exception as exc:
             raise ApiError(502, f"更新確認に失敗: {exc}") from exc
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/mods/check-updates", mods_check_updates)
 
+    def _ssh_reachable(profile, timeout=1.5) -> bool:
+        import socket
+        try:
+            with socket.create_connection(
+                    (profile.address, getattr(profile, "ssh_port", 22)), timeout):
+                return True
+        except Exception:
+            return False
+
+    def _with_vm_ssh(profile, fn, progress=lambda t: None):
+        """SSHが要る操作。VMが停止中なら 起動→操作→停止 して元の状態に戻す。"""
+        started = False
+        vm = profile.vm
+        if vm and not _ssh_reachable(profile):
+            from core.orchestration import _wait_for_port
+            import time as _t
+            progress(f"VM {vm} が停止中のため起動します(数十秒)…")
+            ctx.hyperv.start_vm(vm)
+            _wait_for_port(profile.address, getattr(profile, "ssh_port", 22), 240)
+            _t.sleep(4)
+            started = True
+        try:
+            return fn()
+        finally:
+            if started:
+                progress(f"操作完了。VM {vm} を停止して元に戻します…")
+                try:
+                    ctx.hyperv.stop_vm(vm, force=False)
+                except Exception:
+                    pass
+
     def server_config_get(params, **_):
-        """MCの server.properties を全キー読む(順序保持)。"""
+        """MCの server.properties を全キー読む(順序保持)。VM停止中は一時起動して読む。"""
         srv = _srv(params)
         if srv.profile.game != "minecraft":
             raise ApiError(400, "server.propertiesの編集はMinecraftのみ対応です")
         from core import serverconfig
         try:
-            text = serverconfig.read_config(srv.profile)
+            text = _with_vm_ssh(srv.profile,
+                                lambda: serverconfig.read_config(srv.profile))
         except Exception as exc:
             raise ApiError(502, f"設定の取得に失敗: {exc}") from exc
         props = serverconfig.Properties(text)
@@ -923,7 +1420,7 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         if restart:
             mark("restart", f"mc:{params['name']}")
 
-        def fn():
+        def _write():
             text = serverconfig.read_config(srv.profile)
             props = serverconfig.Properties(text)
             for k, v in changes.items():
@@ -931,6 +1428,10 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             serverconfig.write_config(srv.profile, props.text(), restart=restart,
                                       progress=jobs.progress)
             return f"{len(changes)}項目を保存"
+
+        def fn():
+            # VM停止中なら 起動→保存→停止(restart=Falseなら停止のまま戻る)
+            return _with_vm_ssh(srv.profile, _write, progress=jobs.progress)
         t = jobs.submit(f"⚙ 設定保存: {srv.profile.display_name}", fn,
                         lane=server_lane(params["name"]), category="設定変更")
         return {"task_id": t.id}
@@ -943,7 +1444,7 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             raise ApiError(400, "更新確認はPalworldのみ対応です")
         from core import palupdate
         try:
-            res = palupdate.check(srv.profile)
+            res = _with_vm_ssh(srv.profile, lambda: palupdate.check(srv.profile))
         except Exception as exc:
             raise ApiError(502, f"更新確認に失敗: {exc}") from exc
         state.set_server(params["name"], update=res)     # 一覧の表示にも反映
@@ -957,11 +1458,305 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             raise ApiError(400, "更新はPalworldのみ対応です")
         from core import palupdate
         mark("restart", f"mc:{params['name']}")          # 更新中の停止=意図的
-        t = jobs.submit(f"⬆ 更新: {srv.profile.display_name}",
-                        lambda: palupdate.update(srv.profile, progress=jobs.progress),
-                        lane=server_lane(params["name"]), category="更新")
+        t = jobs.submit(
+            f"⬆ 更新: {srv.profile.display_name}",
+            lambda: _with_vm_ssh(
+                srv.profile,
+                lambda: palupdate.update(srv.profile, progress=jobs.progress),
+                jobs.progress),
+            lane=server_lane(params["name"]), category="更新")
         return {"task_id": t.id}
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/update", server_update)
+
+    # ---- MC 既存ワールドのバージョン変更(アップグレードのみ) ----
+    def mc_versions(params, **_):
+        srv = _srv(params)
+        if srv.profile.game != "minecraft":
+            raise ApiError(400, "バージョン変更はMinecraftのみ対応です")
+        from core import mcversion
+        try:
+            cur = _with_vm_ssh(srv.profile,
+                               lambda: mcversion.installed_version(srv.profile))
+            choices = mcversion.upgradable_versions(cur) if cur else []
+        except Exception as exc:
+            raise ApiError(502, f"バージョン取得に失敗: {exc}") from exc
+        return {"current": cur, "choices": choices}
+    r.add("GET", r"/api/servers/(?P<name>[^/]+)/mc-versions", mc_versions)
+
+    def mc_version_plan(params, body, **_):
+        srv = _srv(params)
+        if srv.profile.game != "minecraft":
+            raise ApiError(400, "Minecraftのみ対応です")
+        target = str((body or {}).get("target", "")).strip()
+        if not target:
+            raise ApiError(400, "target(目標バージョン)を指定してください")
+        from core import mcversion
+
+        def _plan():
+            cur = mcversion.installed_version(srv.profile)
+            if not mcversion.is_upgrade(cur, target):
+                raise ApiError(400,
+                               f"ダウングレード/同一版は不可です(現在 {cur} → {target})")
+            return cur, mcversion.mod_plan(srv.profile, target)
+        try:
+            cur, plan = _with_vm_ssh(srv.profile, _plan)   # 停止中は起動→確認→停止
+        except ApiError:
+            raise
+        except Exception as exc:
+            raise ApiError(502, f"mod互換確認に失敗: {exc}") from exc
+        return {
+            "current": cur, "target": target, "mods": plan,
+            "updatable": [m for m in plan if m["status"] == "update"],
+            "incompatible": [m for m in plan if m["status"] == "incompatible"],
+            "unknown": [m for m in plan if m["status"] == "unknown"],
+        }
+    r.add("POST", r"/api/servers/(?P<name>[^/]+)/mc-version-plan", mc_version_plan)
+
+    def mc_version_change(params, body, **_):
+        srv = _srv(params)
+        if srv.profile.game != "minecraft":
+            raise ApiError(400, "Minecraftのみ対応です")
+        target = str((body or {}).get("target", "")).strip()
+        from core import mcversion
+        mark("restart", f"mc:{params['name']}")      # 更新中の停止=意図的
+        prof, bcfg = srv.profile, ctx.backupcfg
+
+        def job():
+            # VM停止中でも実施(起動→変更→停止)。ダウングレード判定もここで(1サイクル)
+            cur = mcversion.installed_version(prof)
+            if not mcversion.is_upgrade(cur, target):
+                raise RuntimeError(f"ダウングレードはできません(現在 {cur} → {target})")
+            plan = mcversion.mod_plan(prof, target, progress=jobs.progress)
+            return mcversion.change_version(prof, target, plan, bcfg,
+                                            progress=jobs.progress)
+        t = jobs.submit(f"⬆ バージョン変更 →{target}: {prof.display_name}",
+                        lambda: _with_vm_ssh(prof, job, jobs.progress),
+                        lane=server_lane(params["name"]), category="バージョン変更")
+        return {"task_id": t.id}
+    r.add("POST", r"/api/servers/(?P<name>[^/]+)/mc-version-change", mc_version_change)
+
+    # ---------------- MC メモリ変更(JVMヒープ / VM RAM) ----------------
+    _host_mem = {"mb": 0}
+
+    def _host_total_mb() -> int:
+        """ホストの物理メモリ(MB)を実測して返す(初回のみ取得、以後キャッシュ)。"""
+        if not _host_mem["mb"]:
+            try:
+                r = ctx.runner.run_ps(
+                    "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory")
+                _host_mem["mb"] = int(int(r.stdout.strip()) / 1048576)
+            except Exception:
+                _host_mem["mb"] = 48 * 1024      # 取得失敗時のフォールバック
+        return _host_mem["mb"]
+
+    def _check_vm_cap(vm_max_mb: int, example: str) -> None:
+        total = _host_total_mb()
+        if vm_max_mb > total:
+            raise ApiError(400, f"VMメモリ({vm_max_mb/1024:.0f}GB)がホストの物理メモリ"
+                           f"({total/1024:.0f}GB)を超えています。GB単位で入力して"
+                           f"ください(例: {example})")
+
+    def mc_memory_get(params, **_):
+        srv = _srv(params)
+        game = srv.profile.game
+        if game not in ("minecraft", "palworld"):
+            raise ApiError(400, "メモリ変更はMinecraft/Palworldのみ対応です")
+        from core import mcmemory
+        try:
+            if game == "palworld":            # ネイティブ=ヒープ無し、VMメモリのみ
+                return mcmemory.read_vm(srv.profile, ctx.hyperv)
+            return mcmemory.read(srv.profile, ctx.hyperv)
+        except Exception as exc:
+            raise ApiError(502, f"メモリ情報の取得に失敗: {exc}") from exc
+    r.add("GET", r"/api/servers/(?P<name>[^/]+)/mc-memory", mc_memory_get)
+
+    def mc_memory_set(params, body, **_):
+        srv = _srv(params)
+        game = srv.profile.game
+        if game not in ("minecraft", "palworld"):
+            raise ApiError(400, "メモリ変更はMinecraft/Palworldのみ対応です")
+        b = body or {}
+        if game == "palworld":
+            # Palworld=VMメモリのみ。ライブ変更(動的+稼働中)ならサービス無停止。
+            try:
+                vm_max_mb = int(round(float(b.get("vm_gb")) * 1024))
+            except (TypeError, ValueError):
+                raise ApiError(400, "vm_gb(VMメモリGB)を数値で指定してください")
+            if vm_max_mb < 2048:
+                raise ApiError(400, "PalworldのVMメモリは2GB以上にしてください")
+            _check_vm_cap(vm_max_mb, "12 = 12GB")
+            dynamic = bool(b.get("dynamic", True))
+            from core import mcmemory
+            prof = srv.profile
+            mark("restart", f"mc:{params['name']}")
+
+            def pal_job():
+                return mcmemory.change_vm_only(prof, ctx.hyperv, vm_max_mb,
+                                               dynamic=dynamic,
+                                               progress=jobs.progress)
+            t = jobs.submit(f"🧠 メモリ変更: {prof.display_name}", pal_job,
+                            lane=server_lane(params["name"]), category="メモリ")
+            return {"task_id": t.id}
+        try:
+            heap_mb = int(round(float(b.get("heap_gb", 0)) * 1024))
+        except (TypeError, ValueError):
+            raise ApiError(400, "heap_gb(ヒープGB)を数値で指定してください")
+        if heap_mb < 512:
+            raise ApiError(400, "ヒープは0.5GB以上にしてください")
+        dynamic = bool(b.get("dynamic", True))
+        vm_gb = b.get("vm_gb")
+        vm_max_mb = None
+        if vm_gb not in (None, ""):
+            vm_max_mb = int(round(float(vm_gb) * 1024))
+            need = heap_mb + (1024 if dynamic else 512)
+            if vm_max_mb < need:
+                raise ApiError(400, f"VMメモリ({vm_max_mb}MB)がヒープ+余裕({need}MB)より"
+                               "小さいです。VMメモリを増やすかヒープを下げてください")
+            _check_vm_cap(vm_max_mb, "8 = 8GB")
+        else:
+            # ヒープのみ変更: 現在のVM RAMに収まるか検証
+            from core import mcmemory as _mm
+            try:
+                cur = ctx.hyperv.get_memory(srv.profile.vm) if srv.profile.vm else {}
+            except Exception:
+                cur = {}
+            avail = (cur.get("max_mb") if cur.get("dynamic") else cur.get("startup_mb")) or 0
+            if avail and heap_mb + 512 > avail:
+                raise ApiError(400, f"ヒープ({heap_mb}MB)がVMのRAM({avail}MB)を超えます。"
+                               "VMメモリも一緒に増やしてください")
+        from core import mcmemory
+        prof = srv.profile
+        mark("restart", f"mc:{params['name']}")
+
+        def job():
+            return mcmemory.change(prof, ctx.hyperv, heap_mb, vm_max_mb=vm_max_mb,
+                                   dynamic=dynamic, progress=jobs.progress)
+        t = jobs.submit(f"🧠 メモリ変更: {prof.display_name}", job,
+                        lane=server_lane(params["name"]), category="メモリ")
+        return {"task_id": t.id}
+    r.add("POST", r"/api/servers/(?P<name>[^/]+)/mc-memory", mc_memory_set)
+
+    # ---------------- MC クラスタ管理 ----------------
+    def _cm():
+        from core.mccluster import ClusterManager
+        return ClusterManager(ctx.config, ctx.runner)
+
+    def clusters_get(**_):
+        return _cm().summary()
+    r.add("GET", "/api/clusters", clusters_get)
+
+    def cluster_create(body, **_):
+        from core.mccluster import ClusterError
+        try:
+            return _cm().create(str((body or {}).get("name", "")))
+        except ClusterError as exc:
+            raise ApiError(400, str(exc)) from exc
+    r.add("POST", "/api/clusters/create", cluster_create)
+
+    def _cluster_job(title, fn):
+        t = jobs.submit(title, fn, lane="mc-cluster", category="クラスタ")
+        return {"task_id": t.id}
+
+    def cluster_delete(params, **_):
+        name = params["name"]
+        return _cluster_job(f"🌐 クラスタ削除: {name}",
+                            lambda: _cm().delete(name, progress=jobs.progress))
+    r.add("POST", r"/api/clusters/(?P<name>[^/]+)/delete", cluster_delete)
+
+    def cluster_add_member(params, body, **_):
+        name = params["name"]
+        server = str((body or {}).get("server", ""))
+        share = bool((body or {}).get("share", False))
+        return _cluster_job(
+            f"🌐 {name} にサーバー追加: {server}"
+            + (" (共有ON)" if share else " (共有OFF)"),
+            lambda: _cm().add_member(name, server, share, progress=jobs.progress))
+    r.add("POST", r"/api/clusters/(?P<name>[^/]+)/members", cluster_add_member)
+
+    def cluster_set_share(params, body, **_):
+        name, server = params["name"], params["server"]
+        share = bool((body or {}).get("share", False))
+        return _cluster_job(
+            f"🌐 {name}/{server} 共有{'ON' if share else 'OFF'}",
+            lambda: _cm().set_share(name, server, share, progress=jobs.progress))
+    r.add("POST",
+          r"/api/clusters/(?P<name>[^/]+)/members/(?P<server>[^/]+)/share",
+          cluster_set_share)
+
+    def cluster_remove_member(params, **_):
+        name, server = params["name"], params["server"]
+        return _cluster_job(
+            f"🌐 {name} からサーバー除外: {server}",
+            lambda: _cm().remove_member(name, server, progress=jobs.progress))
+    r.add("POST",
+          r"/api/clusters/(?P<name>[^/]+)/members/(?P<server>[^/]+)/remove",
+          cluster_remove_member)
+
+    # ---------------- サーバー削除(config・任意でVMごと) ----------------
+    def server_delete(params, body, **_):
+        srv = _srv(params)
+        name = params["name"]
+        prof = srv.profile
+        del_vm = bool((body or {}).get("delete_vm", False))
+        do_backup = bool((body or {}).get("backup", False))
+        vm = prof.vm
+        if del_vm and vm:
+            others = [s.profile.display_name for s in ctx.servers.values()
+                      if s.profile.vm == vm and s.profile.name != name]
+            if others:
+                raise ApiError(400, f"VM {vm} には他のサーバー({', '.join(others)})も"
+                               "載っています。VMごと削除はできません(設定から削除のみ可)")
+        mark("stop", f"mc:{name}")
+
+        def job():
+            p = jobs.progress
+            try:
+                p("サーバーを停止中…")
+                srv.stop()
+            except Exception as exc:
+                p(f"停止に失敗(続行): {exc}")
+            if do_backup:                     # 削除前バックアップ(VMはまだ生きているのでSSHで取れる)
+                try:
+                    p("削除前バックアップを取得中…")
+                    bk = backup.pal_backup if prof.game == "palworld" else backup.mc_backup
+                    bk(prof, ctx.backupcfg, progress=p)
+                except Exception as exc:
+                    p(f"バックアップに失敗(続行): {exc}")
+            try:
+                from core.mccluster import ClusterManager
+                ClusterManager(ctx.config, ctx.runner).forget_server(
+                    name, undeploy=not del_vm, progress=p)
+            except Exception as exc:
+                p(f"クラスタ掃除に失敗(続行): {exc}")
+            try:
+                from service import pubstat
+                p("外部公開を停止中…")
+                pubstat.unpublish_server(ctx, prof)
+            except Exception as exc:
+                p(f"外部公開停止に失敗(続行): {exc}")
+            # DNSのA/PTR/SRVを掃除(孤児レコードを残さない)。設定とfqdnがある時のみ。
+            if getattr(prof, "fqdn", None) and getattr(ctx.config, "dns", None) is not None:
+                try:
+                    from core import dnsreg
+                    p(f"DNSレコードを削除中({prof.fqdn})…")
+                    dnsreg.unregister_host(ctx.config.dns, prof.fqdn, prof.address,
+                                           service="minecraft", progress=p)
+                except Exception as exc:
+                    p(f"DNS掃除に失敗(続行): {exc}")
+            p("config.yamlから削除中…")
+            from core import settings
+            settings.remove_profile(ctx.config_path, name)
+            vm_deleted = False
+            if del_vm and vm:
+                p(f"VM {vm} を削除中…")
+                vm_deleted = ctx.hyperv.delete_vm(vm, delete_disks=True)
+            ctx.reload()
+            return {"deleted": name, "vm_deleted": vm_deleted}
+
+        title = f"🗑 サーバー削除: {prof.display_name}" + (" (VMごと)" if del_vm else "")
+        t = jobs.submit(title, job, lane=server_lane(name), category="削除")
+        return {"task_id": t.id}
+    r.add("POST", r"/api/servers/(?P<name>[^/]+)/delete", server_delete)
 
     # ---------------- ログ(ライブ表示用) ----------------
     def ark_log(params, query, **_):
@@ -1100,6 +1895,24 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         return {"task_id": t.id}
     r.add("POST", r"/api/vms/(?P<name>[^/]+)/stop", vm_stop)
 
+    def vm_delete(params, body, **_):
+        name = params["name"]
+        delete_disks = bool((body or {}).get("delete_disks", True))
+        linked = [s.profile.display_name for s in ctx.servers.values()
+                  if s.profile.vm == name]
+        if linked:
+            raise ApiError(400, f"VM {name} にはサーバー({', '.join(linked)})が"
+                           "登録されています。先にサーバー削除を行ってください")
+
+        def fn():
+            jobs.progress(f"VM {name} を削除中…")
+            existed = ctx.hyperv.delete_vm(name, delete_disks=delete_disks)
+            return "deleted" if existed else "not_found"
+        t = jobs.submit(f"🗑 VM削除: {name}" + (" (ディスクごと)" if delete_disks else ""),
+                        fn, lane=f"vm:{name}", category="VM操作")
+        return {"task_id": t.id}
+    r.add("POST", r"/api/vms/(?P<name>[^/]+)/delete", vm_delete)
+
     # ---------------- タスク ----------------
     def task_list(query, **_):
         limit = 100
@@ -1162,6 +1975,112 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
                             category="ポート")
             return {"task_id": t.id}
         r.add("POST", "/api/ports/reconcile", ports_reconcile)
+
+    # ---------------- ネットワーク(DNS登録状況 / ポート管理状況) ----------------
+    def network_status(**_):
+        """DNS登録状況とUPnPポート開放状況をまとめて返す(ネットワークタブ用)。"""
+        from core import conntest
+        resolver = ctx.config.dns.host if getattr(ctx.config, "dns", None) else None
+        domain = ctx.config.dns.domain if resolver else None
+
+        # ---- DNS: サーバーごとに .254 で解決して状態を出す ----
+        dns_rows = []
+        for name, srv in ctx.servers.items():
+            p = srv.profile
+            fqdn = getattr(p, "fqdn", None)
+            row = {"name": name, "display": p.display_name, "game": p.game,
+                   "fqdn": fqdn, "address": p.address, "a": [], "srv": None,
+                   "resolves": False, "lan_match": None}
+            if resolver and fqdn:
+                try:
+                    a = conntest.dns_query(resolver, fqdn, 1, timeout=3)
+                    row["a"] = a
+                    row["resolves"] = bool(a)
+                    row["lan_match"] = p.address in a
+                except Exception as exc:
+                    row["error"] = str(exc)
+                if p.game != "palworld":              # SRV(外部公開の名前ルーティング)
+                    try:
+                        s = conntest.dns_query(resolver, f"_minecraft._tcp.{fqdn}",
+                                               33, timeout=3)
+                        if s:
+                            _pr, _w, sport, starget = s[0]
+                            row["srv"] = {"port": sport, "target": starget}
+                    except Exception:
+                        pass
+            dns_rows.append(row)
+
+        # ---- ポート: UPnPマッピングを1回だけ取得して整理 ----
+        ports = {"enabled": portsync.enabled if portsync else None,
+                 "wan": None, "gateway_ok": False, "mappings": [], "servers": []}
+        mappings = []
+        try:
+            from service import pubstat
+            gw = pubstat._gateway(ctx)
+            mappings = gw.client.list_port_mappings()
+            ports["wan"] = gw.external_ip
+            ports["gateway_ok"] = True
+        except Exception as exc:
+            ports["error"] = str(exc)
+
+        def _owner(ep, proto, ic):
+            for _n, s in ctx.servers.items():
+                pp = s.profile
+                pproto = "UDP" if pp.game == "palworld" else "TCP"
+                if (str(getattr(pp, "external_port", None)) == ep and pproto == proto
+                        and ic == pp.address):
+                    return pp.display_name
+            for ah in ctx.arkhosts:
+                if ep in (str(getattr(ah.cfg, "game_port", None)),
+                          str(getattr(ah.cfg, "query_port", None))):
+                    return ah.cfg.display_name
+            return None
+
+        for m in mappings:
+            ep = str(m.get("external_port"))
+            proto = (m.get("protocol") or "").upper()
+            desc = m.get("description") or ""
+            ports["mappings"].append({
+                "external_port": m.get("external_port"), "protocol": proto,
+                "internal_client": m.get("internal_client"),
+                "internal_port": m.get("internal_port"), "description": desc,
+                "owner": _owner(ep, proto, m.get("internal_client")),
+                "gsm": desc.startswith("gsm-"),
+            })
+
+        existing = {(str(m.get("external_port")), (m.get("protocol") or "").upper()): m
+                    for m in mappings}
+        for name, srv in ctx.servers.items():
+            p = srv.profile
+            ep = getattr(p, "external_port", None)
+            proto = "UDP" if p.game == "palworld" else "TCP"
+            m = existing.get((str(ep), proto)) if ep else None
+            ports["servers"].append({
+                "name": name, "display": p.display_name, "game": p.game,
+                "external_port": ep, "proto": proto,
+                "game_port": getattr(p, "game_port", None),
+                "forwarded": bool(m and m.get("internal_client") == p.address),
+            })
+        return {"resolver": resolver, "domain": domain,
+                "dns": dns_rows, "ports": ports}
+    r.add("GET", "/api/network", network_status)
+
+    def server_dns_register(params, **_):
+        """サーバーのfqdn→LAN IPをDNSに(再)登録する(ネットワークタブの便利ボタン)。"""
+        srv = _srv(params)
+        p = srv.profile
+        if getattr(ctx.config, "dns", None) is None:
+            raise ApiError(400, "DNS設定(dns:)がありません")
+        fqdn = getattr(p, "fqdn", None) or f"{params['name']}.{ctx.config.dns.domain}"
+
+        def job():
+            from core import dnsreg
+            f = dnsreg.register_host(ctx.config.dns, fqdn, p.address,
+                                     progress=jobs.progress)
+            return f"DNS登録: {f} → {p.address}"
+        t = jobs.submit(f"🌐 DNS登録: {p.display_name}", job, category="DNS")
+        return {"task_id": t.id}
+    r.add("POST", r"/api/servers/(?P<name>[^/]+)/dns-register", server_dns_register)
 
     # ---------------- 動的設定 ----------------
     if dynserve is not None:

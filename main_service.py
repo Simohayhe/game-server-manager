@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 
 from service.api import API_PORT_DEFAULT, ApiServer
 from service.app import Service
@@ -48,6 +49,18 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
         svc.add(c)
     svc.ctx_extra = {"state": state, "dyn": dyn, "sched": sched, "api": api,
                      "ports": ports, "rec": rec, "history": hist}
+
+    # PC再起動後の復帰: 再起動前に動いていたARKマップを起動し直す(VMはHyper-V任せ)。
+    # 起動をブロックしないよう別スレッドで。記録が無ければ何もしない。
+    def _restore():
+        try:
+            from core import hostpower
+            res = hostpower.consume_restore(ctx, progress=lambda t: print("復帰:", t))
+            if res.get("restored"):
+                print("PC再起動後の復帰:", res["restored"])
+        except Exception as exc:            # noqa: BLE001
+            print("復帰処理で例外:", exc)
+    threading.Thread(target=_restore, name="gsm-host-restore", daemon=True).start()
     return svc
 
 

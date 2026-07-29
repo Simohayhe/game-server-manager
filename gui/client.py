@@ -127,6 +127,12 @@ class Client:
         return self.post("/api/ark/behavior",
                          {"respawn_on_restart": respawn_on_restart})
 
+    def ark_event(self) -> dict:
+        return self.get("/api/ark/event")
+
+    def ark_event_set(self, event: str) -> dict:
+        return self.post("/api/ark/event", {"event": event})
+
     def ark_players_backup(self) -> dict:
         return self.post("/api/ark/players-backup")
 
@@ -147,6 +153,76 @@ class Client:
 
     def server_action(self, name: str, action: str) -> dict:
         return self.post(f"/api/servers/{name}/{action}")
+
+    def server_delete(self, name: str, delete_vm: bool = False,
+                      backup: bool = False) -> dict:
+        return self.post(f"/api/servers/{name}/delete",
+                         {"delete_vm": delete_vm, "backup": backup})
+
+    # ---- ホストPC再起動 ----
+    def host_restart(self, delay_sec: int = 60) -> dict:
+        return self.post("/api/host/restart", {"delay_sec": delay_sec})
+
+    def host_restart_cancel(self) -> dict:
+        return self.post("/api/host/restart/cancel", {})
+
+    # ---- プレイヤー(接続中) ----
+    def players_all(self) -> dict:
+        return self.get("/api/players")
+
+    # ---- モデレーション(BAN/キック/ホワイトリスト) ----
+    def server_moderate(self, name: str, action: str, target: str = "",
+                        reason: str = "") -> dict:
+        return self.post(f"/api/servers/{name}/moderate",
+                         {"action": action, "target": target, "reason": reason},
+                         timeout=30)
+
+    def ark_moderate(self, idx: int, action: str, target: str = "") -> dict:
+        return self.post(f"/api/ark/{idx}/moderate",
+                         {"action": action, "target": target}, timeout=30)
+
+    # ---- ネットワーク(DNS/ポート状況) ----
+    def network(self) -> dict:
+        return self.get("/api/network")
+
+    def net_settings(self) -> dict:
+        return self.get("/api/settings")
+
+    def net_settings_set(self, **kw) -> dict:
+        return self.post("/api/settings", kw)
+
+    def ports_reconcile(self) -> dict:
+        return self.post("/api/ports/reconcile", {})
+
+    def server_dns_register(self, name: str) -> dict:
+        return self.post(f"/api/servers/{name}/dns-register", {})
+
+    # ---- バックアップ統合管理 ----
+    def backups_all(self) -> list[dict]:
+        return self.get("/api/backups")["targets"]
+
+    def backup_delete(self, file: str) -> dict:
+        return self.post("/api/backups/delete", {"file": file})
+
+    def backup_restore_any(self, target: str, file: str) -> dict:
+        return self.post("/api/backups/restore", {"target": target, "file": file})
+
+    def backup_settings(self) -> dict:
+        return self.get("/api/backups/settings")
+
+    def backup_settings_set(self, **kw) -> dict:
+        return self.post("/api/backups/settings", kw)
+
+    # ---- 設定のエクスポート/インポート ----
+    def config_export(self, with_secrets: bool = True, password: str = "") -> dict:
+        return self.post("/api/config/export",
+                         {"with_secrets": with_secrets, "password": password})
+
+    def config_peek(self, data: str, password: str = "") -> dict:
+        return self.post("/api/config/peek", {"data": data, "password": password})
+
+    def config_import(self, data: str, password: str = "") -> dict:
+        return self.post("/api/config/import", {"data": data, "password": password})
 
     # ---- 外部公開(UPnP) ----
     def server_publish(self, name: str, unpublish: bool = False) -> dict:
@@ -174,7 +250,7 @@ class Client:
 
     # ---- MC Mod管理 ----
     def mods_list(self, name: str) -> list[dict]:
-        return self.get(f"/api/servers/{name}/mods", timeout=60)["mods"]
+        return self.get(f"/api/servers/{name}/mods", timeout=300)["mods"]
 
     def mods_search(self, name: str, query: str, mcver: str,
                     source: str = "modrinth") -> list[dict]:
@@ -194,11 +270,12 @@ class Client:
 
     def mods_check_updates(self, name: str, mcver: str) -> list[dict]:
         return self.post(f"/api/servers/{name}/mods/check-updates",
-                         {"mcver": mcver}, timeout=120)["updates"]
+                         {"mcver": mcver}, timeout=300)["updates"]
 
     # ---- MC server.properties ----
     def mc_config_get(self, name: str) -> list[dict]:
-        return self.get(f"/api/servers/{name}/serverconfig", timeout=60)["props"]
+        # VM停止中は一時起動して読むため長めのタイムアウト
+        return self.get(f"/api/servers/{name}/serverconfig", timeout=300)["props"]
 
     def mc_config_set(self, name: str, changes: dict, restart: bool = False) -> dict:
         return self.post(f"/api/servers/{name}/serverconfig",
@@ -211,6 +288,12 @@ class Client:
         return self.post("/api/ark/settings",
                          {"changes": changes, "all_maps": all_maps})
 
+    def ark_mapsettings(self, idx: int) -> dict:
+        return self.get(f"/api/ark/{idx}/mapsettings")
+
+    def ark_mapsettings_set(self, idx: int, changes: dict) -> dict:
+        return self.post(f"/api/ark/{idx}/mapsettings", {"changes": changes})
+
     def ark_rawconfig_get(self, file: str) -> dict:
         return self.get(f"/api/ark/rawconfig?file={file}")
 
@@ -221,7 +304,7 @@ class Client:
     def pal_config_get(self, name: str, keys: list[str]) -> dict:
         from urllib.parse import quote
         return self.get(f"/api/servers/{name}/palconfig?" + ",".join(keys),
-                        timeout=60)
+                        timeout=300)
 
     def pal_config_set(self, name: str, changes: dict, restart: bool = False) -> dict:
         return self.post(f"/api/servers/{name}/palconfig",
@@ -232,6 +315,49 @@ class Client:
 
     def server_update(self, name: str) -> dict:
         return self.post(f"/api/servers/{name}/update", {})
+
+    # ---- MC バージョン変更(アップグレード) ----
+    def mc_versions(self, name: str) -> dict:
+        return self.get(f"/api/servers/{name}/mc-versions", timeout=300)
+
+    def mc_version_plan(self, name: str, target: str) -> dict:
+        return self.post(f"/api/servers/{name}/mc-version-plan",
+                         {"target": target}, timeout=300)
+
+    def mc_version_change(self, name: str, target: str) -> dict:
+        return self.post(f"/api/servers/{name}/mc-version-change",
+                         {"target": target})
+
+    def mc_memory(self, name: str) -> dict:
+        return self.get(f"/api/servers/{name}/mc-memory", timeout=30)
+
+    def mc_memory_set(self, name: str, heap_gb: float | None,
+                      vm_gb: float | None = None, dynamic: bool = True) -> dict:
+        body: dict = {"vm_gb": vm_gb, "dynamic": dynamic}
+        if heap_gb is not None:               # Palworld等はヒープ無し
+            body["heap_gb"] = heap_gb
+        return self.post(f"/api/servers/{name}/mc-memory", body)
+
+    # ---- MC クラスタ ----
+    def clusters(self) -> dict:
+        return self.get("/api/clusters", timeout=30)
+
+    def cluster_create(self, name: str) -> dict:
+        return self.post("/api/clusters/create", {"name": name})
+
+    def cluster_delete(self, name: str) -> dict:
+        return self.post(f"/api/clusters/{name}/delete")
+
+    def cluster_add_member(self, name: str, server: str, share: bool) -> dict:
+        return self.post(f"/api/clusters/{name}/members",
+                         {"server": server, "share": share})
+
+    def cluster_set_share(self, name: str, server: str, share: bool) -> dict:
+        return self.post(f"/api/clusters/{name}/members/{server}/share",
+                         {"share": share})
+
+    def cluster_remove_member(self, name: str, server: str) -> dict:
+        return self.post(f"/api/clusters/{name}/members/{server}/remove")
 
     def server_rcon(self, name: str, cmd: str) -> str:
         return self.post(f"/api/servers/{name}/rcon", {"cmd": cmd},
@@ -244,6 +370,9 @@ class Client:
     def provision(self, **body) -> dict:
         return self.post("/api/provision", body, timeout=60)
 
+    def provision_versions(self, template_id: str) -> dict:
+        return self.get(f"/api/provision/versions?template={template_id}", timeout=25)
+
     def vms(self) -> list[dict]:
         return self.get("/api/vms", timeout=30)["vms"]
 
@@ -255,6 +384,9 @@ class Client:
 
     def vm_stop(self, name: str, force: bool = False) -> dict:
         return self.post(f"/api/vms/{name}/stop", {"force": force})
+
+    def vm_delete(self, name: str, delete_disks: bool = True) -> dict:
+        return self.post(f"/api/vms/{name}/delete", {"delete_disks": delete_disks})
 
     # タスク
     def tasks(self, limit: int = 100) -> list[dict]:

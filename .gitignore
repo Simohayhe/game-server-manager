@@ -10,6 +10,9 @@ portsync.json
 schedules.json
 dynconfig.json
 arkbehavior.json
+arkevent.json
+clusters.json
+host_restore.json
 permissions.json
 permissions.json.tmp
 logs/

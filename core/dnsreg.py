@@ -74,6 +74,37 @@ echo "DNSREG_OK"
     return fqdn
 
 
+def unregister_host(cfg: DnsConfig, fqdn: str, ip: str | None = None,
+                    service: str = "minecraft", progress=lambda text: None) -> None:
+    """サーバー削除時のDNS掃除。fqdnのA(公開でWANを指していても)・SRV、ipのPTRを消す。
+
+    register_host の逆。孤児レコード(削除済みサーバーの名前解決が残る)を防ぐ。
+    """
+    if not fqdn:
+        return
+    fqdn = fqdn if "." in fqdn else f"{fqdn}.{cfg.domain}"
+    srv_name = f"_{service}._tcp.{fqdn}"
+    ptr_line = ""
+    if ip:
+        try:
+            ptr_name, _rev = _reverse_name(ip)
+            ptr_line = (f'mysql -e "DELETE FROM phpipam.records '
+                        f"WHERE name='{ptr_name}' AND type='PTR';\"\n"
+                        f"rec_control wipe-cache '{ptr_name}' >/dev/null 2>&1 || true\n")
+        except DnsRegError:
+            ptr_line = ""
+    script = f"""#!/bin/bash
+set -e
+mysql -e "DELETE FROM phpipam.records WHERE name='{fqdn}' AND type IN ('A','AAAA');"
+mysql -e "DELETE FROM phpipam.records WHERE name='{srv_name}' AND type='SRV';"
+{ptr_line}rec_control wipe-cache '{fqdn}' >/dev/null 2>&1 || true
+rec_control wipe-cache '{srv_name}' >/dev/null 2>&1 || true
+echo DNSREG_OK
+"""
+    progress(f"DNS掃除: {fqdn}(A/SRV{'・PTR' if ip else ''})")
+    _run_script(cfg, script)
+
+
 def update_ip(cfg: DnsConfig, old_ip: str, new_ip: str,
               progress=lambda text: None) -> None:
     """IP変更に伴い、old_ipを指す全Aレコードとold_ipのPTRを新IPへ付け替える。"""

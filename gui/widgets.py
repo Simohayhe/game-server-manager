@@ -351,3 +351,169 @@ class LogView(ctk.CTkFrame):
                 add = new_lines[i + 1:]
                 return add if add else None
         return False                     # 見つからない=別ログに切替わった等
+
+
+
+
+class ScrollCombo(ctk.CTkFrame):
+    """マウスホイールでスクロールできる選択リスト付きコンボ(tk.Listbox版・堅牢)。
+
+    候補が多いと CTkComboBox のドロップダウンは画面外にはみ出し小矢印でしか動かせない。
+    これは Entry(絞り込み/直接入力) + ▼ で下に tk.Listbox のポップアップを出す。
+    Listbox はホイールスクロールにネイティブ対応し、高さは中身に合わせる。
+    get()/set()/set_values() は CTkComboBox と同じ感覚で使える。
+    """
+
+    _ROW_H = 22
+    _MAX_ROWS = 12
+
+    def __init__(self, master, values=None, width=500, height=30,
+                 command=None, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self._values = [str(v) for v in (values or [])]
+        self._command = command
+        self._popup = None
+        self.lb = None
+        self.entry = ctk.CTkEntry(self, width=max(60, width - 44), height=height)
+        self.entry.pack(side="left")
+        self.entry.bind("<KeyRelease>", self._on_type)
+        self.entry.bind("<Down>", lambda _e: self._focus_list())
+        self.btn = ctk.CTkButton(self, text="▼", width=34, height=height,
+                                 corner_radius=6, fg_color="#2b303a",
+                                 hover_color="#39404d", command=self._toggle)
+        self.btn.pack(side="left", padx=(4, 0))
+        # ダイアログに1回だけバインド(ハンドラはポップアップが閉じてる時は何もしない)。
+        # ダイアログ内クリック→閉じる / 別ウィンドウへフォーカスが移ったら閉じる。
+        dlg = self.winfo_toplevel()
+        dlg.bind("<Button-1>", self._maybe_close, add="+")
+        dlg.bind("<FocusOut>", lambda _e: self.after(150, self._close_if_away), add="+")
+        self.bind("<Destroy>", lambda _e: self._close())
+
+    # ---- CTkComboBox互換 ----
+    def get(self) -> str:
+        return self.entry.get()
+
+    def set(self, value) -> None:
+        self.entry.delete(0, "end")
+        self.entry.insert(0, str(value))
+
+    def set_values(self, values) -> None:
+        self._values = [str(v) for v in (values or [])]
+        if self._popup is not None:
+            self._fill()
+
+    # ---- ポップアップ ----
+    def _toggle(self):
+        self._close() if self._popup is not None else self._open()
+
+    def _open(self):
+        if self._popup is not None:
+            return
+        top = tk.Toplevel(self)
+        top.overrideredirect(True)
+        top.attributes("-topmost", True)
+        self._popup = top
+        outer = tk.Frame(top, bg="#39404d")           # 枠線代わり
+        outer.pack(fill="both", expand=True)
+        sb = tk.Scrollbar(outer, orient="vertical")
+        self.lb = tk.Listbox(outer, activestyle="none", bg="#1b1f27",
+                             fg="#e8eaed", selectbackground="#2f5c9e",
+                             selectforeground="#ffffff", highlightthickness=0,
+                             borderwidth=0, font=("Meiryo UI", 10),
+                             yscrollcommand=sb.set, exportselection=False)
+        sb.config(command=self.lb.yview)
+        sb.pack(side="right", fill="y")
+        self.lb.pack(side="left", fill="both", expand=True, padx=1, pady=1)
+        self.lb.bind("<ButtonRelease-1>", self._pick_selected)   # クリックで確定
+        self.lb.bind("<Return>", self._pick_selected)
+        self.lb.bind("<Escape>", lambda _e: self._close())
+        # ホイールはListboxだけ動かし背景に伝播させない(return "break")
+        self.lb.bind("<MouseWheel>", self._on_wheel)
+        self._fill(use_filter=False)      # ▼で開いた時は全件(現在値で絞らない)
+
+    def _on_wheel(self, e):
+        self.lb.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        return "break"
+
+    def _close_if_away(self):
+        """フォーカスがこのダイアログにもポップアップにも無ければ閉じる(別画面へ移動時)。"""
+        if self._popup is None or not self.winfo_exists():
+            return
+        foc = None
+        try:
+            foc = self.focus_get()
+        except Exception:
+            foc = None
+        if foc is None:                    # アプリ外/別ウィンドウにフォーカス
+            self._close()
+            return
+        ftop = foc.winfo_toplevel()
+        if ftop is not self.winfo_toplevel() and ftop is not self._popup:
+            self._close()
+
+    def _fill(self, use_filter=True):
+        if self._popup is None or self.lb is None:
+            return
+        flt = self.entry.get().strip().lower() if use_filter else ""
+        vals = [v for v in self._values if flt in v.lower()] if flt else list(self._values)
+        if not vals:
+            vals = list(self._values)
+        self.lb.delete(0, "end")
+        for v in vals:
+            self.lb.insert("end", v)
+        # 全件表示のときは現在値をハイライトして見える位置へ
+        if not use_filter:
+            cur = self.entry.get().strip()
+            if cur in vals:
+                i = vals.index(cur)
+                self.lb.selection_set(i)
+                self.lb.see(i)
+        rows = min(max(len(vals), 1), self._MAX_ROWS)
+        w = max(self.entry.winfo_width(), 220)
+        x = self.entry.winfo_rootx()
+        y = self.entry.winfo_rooty() + self.entry.winfo_height() + 1
+        self._popup.geometry(f"{w}x{rows * self._ROW_H + 2}+{x}+{y}")
+
+    def _focus_list(self):
+        if self._popup is None:
+            self._open()
+        if self.lb and self.lb.size():
+            self.lb.focus_set()
+            self.lb.selection_clear(0, "end")
+            self.lb.selection_set(0)
+            self.lb.activate(0)
+
+    def _pick_selected(self, _e=None):
+        if not self.lb:
+            return
+        sel = self.lb.curselection()
+        if not sel:
+            return
+        value = self.lb.get(sel[0])
+        self.set(value)
+        self._close()
+        if callable(self._command):
+            self._command(value)
+
+    def _on_type(self, _e=None):
+        if self._popup is None:
+            self._open()
+        else:
+            self._fill()
+
+    def _maybe_close(self, event):
+        if self._popup is None:
+            return
+        w = str(event.widget)
+        if w.startswith(str(self._popup)) or w.startswith(str(self)):
+            return
+        self._close()
+
+    def _close(self):
+        if self._popup is not None:
+            try:
+                self._popup.destroy()
+            except Exception:
+                pass
+            self._popup = None
+            self.lb = None

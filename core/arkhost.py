@@ -12,7 +12,32 @@ RCONポート/管理パスワードは config_dir の GameUserSettings.ini か�
 from __future__ import annotations
 
 import re
+import threading
 import time
+
+# ASAの季節イベントは公式Mod(CurseForge / StudioWildcardMods)で配布される。
+# ASE時代の -ActiveEvent=<名> では有効化できず、-mods=<ID> で読み込む必要がある。
+# key はGSM内部の識別子(routesのARK_EVENTSと一致)。値はCurseForgeのMod ID(API照合済)。
+EVENT_MODS = {
+    "Summer": "927091",            # Summer Bash(夏)
+    "WinterWonderland": "927090",  # Winter Wonderland(冬)
+    "FearEvolved": "877752",       # Fear Ascended(ハロウィン)
+    "Love": "927084",              # Love Ascended(バレンタイン)
+    "Easter": "877745",            # Eggcellent Adventure(イースター)
+    "TurkeyTrial": "927083",       # Turkey Trial(感謝祭)
+}
+
+
+def merge_mods(args: str, mod_id: str) -> str:
+    """起動引数の -mods= に mod_id を(重複なく)足す。無ければ -mods= を新設。"""
+    m = re.search(r'(-mods=)([^\s"?]+)', args, re.IGNORECASE)
+    if m:
+        ids = [x for x in m.group(2).split(",") if x]
+        if mod_id in ids:
+            return args
+        ids.append(mod_id)
+        return args[:m.start()] + f"{m.group(1)}{','.join(ids)}" + args[m.end():]
+    return f"{args} -mods={mod_id}"
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +59,7 @@ class ArkHostConfig:
     install_dir: str = ""        # このマップ専用のインストール(空=exe_pathから導出)
     use_dynamic_config: bool = False  # ON時、起動引数に -UseDynamicConfig を付与
     dynamic_config_url: str = ""      # ON時の -CustomDynamicConfigUrl=(ASAは起動引数で渡す)
+    active_event: str = ""            # 季節イベント。ON時 -ActiveEvent=<名> を付与(ASAは起動引数専用)
 
     @property
     def install_root(self) -> Path:
@@ -114,6 +140,12 @@ class ArkHostConfig:
             if self.dynamic_config_url and "customdynamicconfigurl" not in args.lower():
                 args = f'{args} -CustomDynamicConfigUrl="{self.dynamic_config_url}"'
             args = f"{args} -UseDynamicConfig"
+        # 季節イベント: ASAは公式Modで有効化する(-ActiveEventは効かない)。
+        # active_event に対応するMod IDを -mods= にマージする。基のlaunch_argsには
+        # イベントMODを書かないので、イベント切替=毎回この計算でクリーンに入れ替わる。
+        mod_id = EVENT_MODS.get(self.active_event) if self.active_event else None
+        if mod_id:
+            args = merge_mods(args, mod_id)
         return args
 
 
@@ -138,6 +170,17 @@ class ArkHost:
     def __init__(self, cfg: ArkHostConfig, runner):
         self.cfg = cfg
         self.runner = runner
+        # 停止が要求されたら立てる。起動待ち(wait_ready)や再起動の予告カウントダウンは
+        # これを見て途中で中断する → 「起動中に停止」で即座に止められる。
+        self._cancel = threading.Event()
+
+    def request_cancel(self) -> None:
+        """進行中の起動待ち/カウントダウンを中断させる(停止要求時に呼ぶ)。"""
+        self._cancel.set()
+
+    def _sleep_cancelable(self, secs: float) -> bool:
+        """secs 待つ。途中で停止要求が来たら True を返して即抜ける。"""
+        return self._cancel.wait(timeout=secs)
 
     # ---- 状態 ----
     def uptime_seconds(self) -> int | None:
@@ -260,12 +303,14 @@ class ArkHost:
         例: [(60,..),(30,..),(10,..)] なら 告知→30秒待ち→告知→20秒待ち→告知→10秒待ち。"""
         items = sorted(schedule, key=lambda x: -x[0])
         for i, (secs, msg) in enumerate(items):
+            if self._cancel.is_set():          # 停止要求が来たら予告を打ち切る
+                return
             progress(f"予告(残り{secs}秒): {msg}")
             self.announce(msg)
             next_secs = items[i + 1][0] if i + 1 < len(items) else 0
             wait = max(0, secs - next_secs)
-            if wait:
-                time.sleep(wait)
+            if wait and self._sleep_cancelable(wait):
+                return
 
     def info(self) -> dict:
         return {
@@ -276,6 +321,7 @@ class ArkHost:
 
     # ---- 起動 / 停止 ----
     def start(self, progress=lambda t: None) -> None:
+        self._cancel.clear()            # 新規起動=過去の停止要求を持ち越さない
         if self.is_running():
             raise ArkHostError("既にARKサーバーが起動しています(二重起動防止)")
         if not Path(self.cfg.exe_path).exists():
@@ -336,22 +382,30 @@ class ArkHost:
             return f"(ログを読み取れません: {e})", 0
 
     def stop(self, progress=lambda t: None) -> None:
+        self._cancel.set()                  # 起動待ち中なら中断させる(起動中の停止対応)
         if not self.is_running():
+            self._cancel.clear()
             return
+        saved = False
         try:
             progress("ワールド保存中(saveworld)…")
             self.rcon_command("saveworld")
             time.sleep(2)
             progress("サーバー終了指示(DoExit)…")
             self.rcon_command("DoExit")
+            saved = True                    # RCONが応答した=起動完了していた
         except Exception:
-            pass  # RCON不通でも下でプロセス停止する
-        for _ in range(20):                 # 最大60秒、消滅を待つ
+            pass  # RCON不通(起動途中/未応答)でも下でプロセス停止する
+        # 保存できた(起動完了)なら終了を待つ。RCON不通=まだ起動途中なので、
+        # 60秒も待たずに速やかにプロセスを止める(=起動を中断する)。
+        rounds = 20 if saved else 2         # saved:最大60秒 / 起動途中:最大~6秒
+        for _ in range(rounds):
             if not self.is_running():
-                progress("停止しました(保存済み)")
+                progress("停止しました" + ("(保存済み)" if saved else "(起動を中断)"))
+                self._cancel.clear()
                 return
             time.sleep(3)
-        progress("応答が無いためプロセスを停止…")
+        progress("プロセスを停止します…" + ("" if saved else "(起動中を中断)"))
         gp = self.cfg.game_port
         if gp:                              # このマップのプロセスだけを止める
             self.runner.run_ps(
@@ -362,6 +416,8 @@ class ArkHost:
             self.runner.run_ps(
                 f"Get-Process {self.cfg.process_name} -ErrorAction SilentlyContinue "
                 f"| Stop-Process -Force", timeout=30)
+        progress("プロセスを停止しました")
+        self._cancel.clear()
 
     def restart(self, progress=lambda t: None) -> None:
         self.stop(progress=progress)
@@ -387,15 +443,21 @@ class ArkHost:
         ログの 'advertising for join' は前セッションの残骸を誤検出しうるので、
         RCON(ListPlayers)が実際に応答することを起動完了の合図にする。"""
         deadline = time.time() + timeout
-        time.sleep(8)                          # 起動直後の猶予(旧プロセス消滅待ち含む)
+        if self._sleep_cancelable(8):          # 起動直後の猶予(停止要求で即中断)
+            progress("停止要求を受けたので起動待ちを中断します")
+            return False
         while time.time() < deadline:
+            if self._cancel.is_set():          # 「起動中に停止」→ ここで待ちを打ち切る
+                progress("停止要求を受けたので起動待ちを中断します")
+                return False
             if not self.is_running():
                 return False
             try:
                 self.rcon_command("ListPlayers")   # 応答すればRCON稼働=起動完了
                 return True
             except Exception:
-                time.sleep(6)
+                if self._sleep_cancelable(6):
+                    return False
         return False
 
     def respawn_wild_dinos_after_ready(self, progress=lambda t: None) -> None:

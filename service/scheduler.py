@@ -112,6 +112,8 @@ class SchedulerService:
             self._fire_players(job)
         elif job.kind == "ark-all":
             self._fire_ark_all(job)
+        elif job.kind == "host":
+            self._fire_host(job)
         elif job.kind == "ark":
             ah = self.ctx.ark_by_label(job.target)
             if ah is None:
@@ -120,6 +122,18 @@ class SchedulerService:
             self._submit_ark(job, ah)
         else:
             self._fire_server(job)
+
+    def _fire_host(self, job) -> None:
+        """予約でPC(ホスト)を再起動する。ARKは保存停止→復帰記録、VMはHyper-V任せ。
+
+        予約なので取り消しUIは無い(予告カウントダウンでプレイヤーへ告知して再起動)。
+        """
+        def fn():
+            from core import hostpower
+            res = hostpower.restart_host(self.ctx, delay_sec=60,
+                                         progress=self.jobs.progress)
+            return "PC再起動を開始" if res.get("restarting") else "スキップ/中止"
+        self.jobs.submit("⏰ 予約: 🖥 PC再起動", fn, lane="host", category="予約")
 
     def fire_by_id(self, sid: str) -> None:
         for j in self.schedules:
@@ -151,10 +165,24 @@ class SchedulerService:
                     out.append("再起動中止(遅延)")
                 else:
                     out.append(self._do_restart(ah))
+            if job.do_respawn:
+                out.append(self._do_respawn(ah))
             return " / ".join(out) or "(なし)"
 
         self.jobs.submit(f"⏰ 予約({job.action_text()}): {name}", fn,
                          lane=ark_lane(label), category="予約")
+
+    def _do_respawn(self, ah) -> str:
+        """稼働中マップの野生恐竜を湧き直す(DestroyWildDinos)。停止中はスキップ。"""
+        try:
+            if not ah.is_running():
+                return "湧き直しスキップ(停止中)"
+            self.jobs.progress(
+                f"{ah.cfg.display_name}: 野生恐竜を湧き直し(DestroyWildDinos)…")
+            ah.destroy_wild_dinos()
+            return "湧き直し"
+        except Exception as exc:
+            return f"湧き直し失敗({exc})"
 
     def _do_backup(self, ah) -> str:
         self.jobs.progress(f"{ah.cfg.display_name}: バックアップ中…")
@@ -244,6 +272,8 @@ class SchedulerService:
                             self.jobs.progress("⏭ 遅延のため以降の再起動を中止")
                             break
                         self._do_restart(ah)
+                    if job.do_respawn:
+                        self._do_respawn(ah)
                 return "done"
             self.jobs.submit(f"⏰ ローリング({job.action_text()}): ARK全マップ", fn,
                              lane="ark-rolling", category="予約")
@@ -334,6 +364,7 @@ class SchedulerService:
                     do_backup=bool(d.get("do_backup", False)),
                     do_update=bool(d.get("do_update", False)),
                     do_restart=bool(d.get("do_restart", True)),
+                    do_respawn=bool(d.get("do_respawn", False)),
                     rolling=bool(d.get("rolling", False)),
                     order=list(d.get("order", [])),
                     interval_min=int(d.get("interval_min", 0) or 0),

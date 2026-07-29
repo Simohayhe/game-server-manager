@@ -46,6 +46,7 @@ class Monitor:
         self._ark_log_size: dict[int, int] = {}      # ログサイズ(再起動=切り詰めの検知用)
         self._prev_names: dict[str, set] = {}   # key -> 前回の接続者名(入退室判定用)
         self._last_build_check = 0.0
+        self._notified_ark_build = None                 # 通知済みの最新ビルド(重複通知防止)
         self._pal_update_check: dict[str, float] = {}   # name -> 最終更新確認時刻
         self._last_pubstat = 0.0
         self._vm_list_cache: list[dict] = []
@@ -221,6 +222,29 @@ class Monitor:
             self.state.set_meta(latest_build=latest)
         except Exception as exc:
             print("最新ビルド確認に失敗:", exc)
+            return
+        if not latest:
+            return
+        # 更新あり通知(新規にこの最新ビルドを検知した時だけ1回)。ARKは全マップ共通のアプリ。
+        try:
+            outdated = []
+            for ah in self.ctx.arkhosts:
+                b = arkupdate.installed_buildid(ah.cfg.install_root)
+                if b and b != latest:
+                    outdated.append(ah.cfg.display_name)
+            if outdated and latest != self._notified_ark_build:
+                self._notified_ark_build = latest
+                if self.notifier:
+                    self.notifier(
+                        "update",
+                        f"🆕 ARKサーバーに更新があります (build {latest})。"
+                        f"更新が必要: {len(outdated)}マップ ({'、'.join(outdated[:5])}"
+                        f"{' ほか' if len(outdated) > 5 else ''})",
+                        "ark")
+            elif not outdated:
+                self._notified_ark_build = latest   # 全マップ最新=次の更新でまた通知できる
+        except Exception as exc:
+            print("ARK更新通知の判定に失敗:", exc)
 
     # ---- MC / Palworld ----
     def _server_loop(self) -> None:
@@ -246,6 +270,36 @@ class Monitor:
         except Exception as exc:
             print("VM状態の取得に失敗(SSH省略なしで続行):", exc)
             return {}
+
+    def _check_ip_conflicts(self, vms: dict) -> None:
+        """同じIPのVMが両方起動中(IP競合)を検知し、新規発生/解消を通知する。"""
+        from core import ipconflict
+        try:
+            conflicts = ipconflict.find_conflicts(self.ctx.config.servers, vms)
+        except Exception as exc:
+            print("IP競合チェックで例外:", exc)
+            return
+        current = {c["ip"]: c for c in conflicts}
+        prev = getattr(self, "_ip_conflicts", {})
+        # 状態を保存(APIから見せられるように)
+        self._ip_conflicts = current
+        try:
+            self.state.set_meta(ip_conflicts=list(current.values()))
+        except Exception:
+            pass
+        # 新規発生
+        for ip, c in current.items():
+            if ip not in prev:
+                who = " / ".join(c["servers"])
+                print(f"⚠ IP競合検知: {ip} ({who})")
+                self._notify_dns(
+                    "ip_conflict",
+                    f"⚠ IPアドレス競合: {ip} が {who} で同時に起動しています。"
+                    "どちらか一方を停止してください(両方まともに通信できません)。")
+        # 解消
+        for ip in prev:
+            if ip not in current:
+                self._notify_dns("ip_conflict", f"✅ IP競合が解消しました: {ip}")
 
     def _server_version(self, srv) -> str | None:
         """サーバーのゲームバージョンを取得。Palworldは RCON Info から拾う。
@@ -308,6 +362,7 @@ class Monitor:
     def _poll_servers(self) -> None:
         vms = self._vm_states()
         self.state.set_meta(vms=self._vm_list_cache)   # VM一覧もAPIから即返せるように
+        self._check_ip_conflicts(vms)
         for name, srv in self.ctx.servers.items():
             vm = srv.profile.vm
             # VMが止まっているサーバーはSSHせず即「停止」= 8秒×台数の待ちを回避

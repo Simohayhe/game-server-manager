@@ -139,6 +139,93 @@ class HyperVManager:
         if not result.ok or "CLONE_OK" not in result.stdout:
             raise HyperVError(f"VMクローンに失敗しました: {result.stderr.strip()}")
 
+    def get_memory(self, name: str) -> dict:
+        """VMのメモリ構成を返す(MB単位)。{state, dynamic, startup_mb, min_mb, max_mb, assigned_mb}。"""
+        q = _quote(name)
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            f"$vm = Get-VM -Name {q}; $m = Get-VMMemory -VMName {q}; "
+            "[pscustomobject]@{state=$vm.State.ToString(); dynamic=$m.DynamicMemoryEnabled; "
+            "startup=$m.Startup; min=$m.Minimum; max=$m.Maximum; assigned=$vm.MemoryAssigned} "
+            "| ConvertTo-Json -Compress"
+        )
+        result = self._runner.run_ps(script, timeout=30)
+        if not result.ok:
+            raise HyperVError(f"VMメモリ取得に失敗: {result.stderr.strip()}")
+        import json as _json
+        d = _json.loads(result.stdout.strip())
+        mb = lambda b: int(round(int(b) / 1048576)) if b else 0
+        return {"state": d["state"], "dynamic": bool(d["dynamic"]),
+                "startup_mb": mb(d["startup"]), "min_mb": mb(d["min"]),
+                "max_mb": mb(d["max"]), "assigned_mb": mb(d["assigned"])}
+
+    def set_memory_live(self, name: str, max_mb: int, min_mb: int | None = None) -> None:
+        """稼働中の動的メモリVMの最大(と最小)を変更する(再起動なし)。静的だと失敗。"""
+        q = _quote(name)
+        extra = f" -MinimumBytes {int(min_mb)}MB" if min_mb else ""
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            f"$m = Get-VMMemory -VMName {q}; "
+            "if (-not $m.DynamicMemoryEnabled) { throw '静的メモリのVMは稼働中に変更できません' }; "
+            f"Set-VMMemory -VMName {q} -MaximumBytes {int(max_mb)}MB{extra}; 'OK'"
+        )
+        result = self._runner.run_ps(script, timeout=30)
+        if not result.ok or "OK" not in result.stdout:
+            raise HyperVError(f"メモリのライブ変更に失敗: {result.stderr.strip() or result.stdout.strip()}")
+
+    def set_memory_offline(self, name: str, dynamic: bool, startup_mb: int,
+                           min_mb: int | None = None, max_mb: int | None = None) -> None:
+        """VM停止中にメモリを設定する。dynamic=Trueで動的メモリ(min/startup/max)に切替。"""
+        q = _quote(name)
+        if dynamic:
+            mn = int(min_mb or startup_mb)
+            mx = int(max_mb or startup_mb)
+            memcmd = (f"Set-VMMemory -VMName {q} -DynamicMemoryEnabled $true"
+                      f" -MinimumBytes {mn}MB -StartupBytes {int(startup_mb)}MB"
+                      f" -MaximumBytes {mx}MB")
+        else:
+            memcmd = (f"Set-VMMemory -VMName {q} -DynamicMemoryEnabled $false"
+                      f" -StartupBytes {int(startup_mb)}MB")
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            f"$vm = Get-VM -Name {q}; "
+            "if ($vm.State -ne 'Off') { throw 'VMを停止してから変更してください' }; "
+            f"{memcmd}; 'OK'"
+        )
+        result = self._runner.run_ps(script, timeout=60)
+        if not result.ok or "OK" not in result.stdout:
+            raise HyperVError(f"VMメモリ設定に失敗: {result.stderr.strip() or result.stdout.strip()}")
+
+    def delete_vm(self, name: str, delete_disks: bool = True) -> bool:
+        """VMを削除する。delete_disks=Trueなら仮想ディスクとVMフォルダも消す。
+
+        安全策: ディスクは Get-VMHardDiskDrive の実パスのみを削除する。VMフォルダは
+        「先頭要素がVM名と一致」する場合だけ再帰削除する(誤削除防止)。
+        戻り値: VMが存在して削除したら True、元々無ければ False。
+        """
+        qn = _quote(name)
+        dd = "$true" if delete_disks else "$false"
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            f"$vm = Get-VM -Name {qn} -ErrorAction SilentlyContinue; "
+            "if (-not $vm) { 'VM_NOT_FOUND' } else { "
+            f"if ($vm.State -ne 'Off') {{ Stop-VM -Name {qn} -TurnOff -Force }}; "
+            f"$disks = @(Get-VMHardDiskDrive -VMName {qn} | Select-Object -ExpandProperty Path); "
+            "$vmdir = $vm.Path; "
+            f"Remove-VM -Name {qn} -Force; "
+            f"if ({dd}) {{ "
+            "foreach ($d in $disks) { if ($d -and (Test-Path $d)) { Remove-Item -LiteralPath $d -Force } }; "
+            f"if ($vmdir -and (Test-Path $vmdir) -and ((Split-Path $vmdir -Leaf) -eq {qn})) "
+            "{ Remove-Item -LiteralPath $vmdir -Recurse -Force } "
+            "}; 'DELETE_OK' }"
+        )
+        result = self._runner.run_ps(script, timeout=300)
+        if not result.ok or (
+                "DELETE_OK" not in result.stdout and "VM_NOT_FOUND" not in result.stdout):
+            raise HyperVError(
+                f"VM削除に失敗しました: {result.stderr.strip() or result.stdout.strip()}")
+        return "VM_NOT_FOUND" not in result.stdout
+
     def duplicate_vm(self, source: str, new_name: str,
                      memory_mb: int, cpu_count: int, start: bool = True) -> None:
         """任意のVMを複製する(ゲーム構築なしの素コピー)。

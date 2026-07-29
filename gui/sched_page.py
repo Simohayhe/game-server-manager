@@ -12,6 +12,7 @@ COLS = ("kind", "action", "days", "times", "keep", "enabled")
 H = {"kind": ("種別", 120), "action": ("動作", 200), "days": ("曜日", 80),
      "times": ("時刻", 160), "keep": ("世代", 70), "enabled": ("有効", 90)}
 KINDS = {"ark-all": "🦖 ARK全", "ark-players": "🧬 プレイヤー", "ark": "🦖 ARK",
+         "host": "🖥 PC",
          "mc": "🟩/🐑"}
 
 
@@ -47,6 +48,7 @@ class SchedPage(Page):
                   for a in ark]
             t += [(("🐑 " if s["game"] == "palworld" else "🟩 ") + s["display_name"],
                    "mc", s["name"], s["display_name"]) for s in servers]
+            t.append(("🖥 このPCを再起動(ARK/VMは自動復帰)", "host", "host", "このPC"))
             self._targets = t
         self.worker.submit(lambda: (self.client.ark(), self.client.servers()), done)
 

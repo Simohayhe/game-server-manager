@@ -27,6 +27,7 @@ DEFAULT_EVENTS = {
     "player_leave": True,  # プレイヤー退室
     "dns_down": True,      # DNS障害(名前解決できない=外部参加の生命線)
     "dns_recover": True,   # DNS復旧
+    "ip_conflict": True,   # IPアドレス競合(同一IPのVMが両方起動中)
     "port": False,         # ポート開閉(既定OFF=うるさいので)
 }
 EVENT_LABELS = {
@@ -35,6 +36,7 @@ EVENT_LABELS = {
     "backup": "バックアップ完了", "update": "更新あり",
     "player_join": "プレイヤー入室", "player_leave": "プレイヤー退室",
     "dns_down": "DNS障害", "dns_recover": "DNS復旧",
+    "ip_conflict": "IPアドレス競合",
     "port": "ポート開閉",
 }
 

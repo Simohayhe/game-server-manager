@@ -16,6 +16,28 @@ GAMEMODE = "/Script/ShooterGame.ShooterGameMode"
 SERVER_SETTINGS = "ServerSettings"
 GAME_SESSION = "/Script/Engine.GameSession"
 
+# マップ固有の設定。GameUserSettings.ini の「マップ名」セクションに書く。
+# keyは map_label(例 'Ragnarok')。これは全マップ共通ではなく、そのマップのconfigにだけ書く。
+# items: (key, type, ラベル, 既定値)。出典: ark.wiki.gg / ARKサーバーマネージャ。
+# ※ 公式マップで固有INIセクションが文書化されているのは実質 Ragnarok のみ。
+#   他マップの固有設定が判明したらここに足すだけで、GUI/APIは自動対応する。
+ARK_MAP_SETTINGS = {
+    "Ragnarok": {
+        "section": "Ragnarok",
+        "items": [
+            ("EnableVolcano", "bool", "火山を有効化(噴火する)", "False"),
+            ("VolcanoIntensity", "float",
+             "噴火の激しさ(小さいほど激しい・推奨1.0/最小0.25、マルチは0.5以上)", "1.0"),
+            ("VolcanoInterval", "float",
+             "噴火の間隔(0=既定の約5000〜15000秒。0より大は倍率・最小0.1)", "0"),
+            ("AllowMultipleTamedUnicorns", "bool",
+             "テイム済ユニコーンを複数許可(OFF=常に1体まで)", "False"),
+            ("UnicornSpawnInterval", "int",
+             "ユニコーン再出現までの時間(時間・最大はこの2倍)", "24"),
+        ],
+    },
+}
+
 
 class ArkIni:
     """セクション対応の .ini。行リストで保持し、key単位で最小差し替えする。"""

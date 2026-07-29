@@ -43,21 +43,29 @@ script: |
     else FABRIC_META="https://meta.fabricmc.net"; KIND="Fabric"
     fi
   else
-    JAVA_VER=21; FABRIC_META="https://meta.fabricmc.net"; KIND="Fabric"
+    # 26.x以降のMCサーバーjarは Java 25 でコンパイルされている(class file version 69)。
+    # Java 21(class 65)では UnsupportedClassVersionError で起動できない。
+    JAVA_VER=25; FABRIC_META="https://meta.fabricmc.net"; KIND="Fabric"
   fi
   echo "  MC $GAME_VER -> Java $JAVA_VER / $KIND ($FABRIC_META)"
 
   echo "[2/9] Java $JAVA_VER (Temurin) と必要パッケージ"
-  apt-get update -qq
-  apt-get install -y -qq curl wget gnupg apt-transport-https ca-certificates python3 > /dev/null
+  echo "  aptロック解放を待機(unattended-upgrades対策)…"
+  for _ in $(seq 1 120); do
+    fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/lib/dpkg/lock >/dev/null 2>&1 || break
+    sleep 5
+  done
+  APT="apt-get -o DPkg::Lock::Timeout=300"
+  $APT update -qq
+  $APT install -y -qq curl wget gnupg apt-transport-https ca-certificates python3 > /dev/null
   if [ ! -f /etc/apt/sources.list.d/adoptium.list ]; then
     install -d -m 0755 /etc/apt/keyrings
     wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg
     CODENAME=$(awk -F= '/^VERSION_CODENAME/{print $2}' /etc/os-release)
     echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $CODENAME main" > /etc/apt/sources.list.d/adoptium.list
-    apt-get update -qq
+    $APT update -qq
   fi
-  apt-get install -y -qq "temurin-${JAVA_VER}-jre" > /dev/null
+  $APT install -y -qq "temurin-${JAVA_VER}-jre" > /dev/null
   JAVA_BIN=$(ls -d /usr/lib/jvm/temurin-${JAVA_VER}-jre*/bin/java 2>/dev/null | head -1)
   [ -x "$JAVA_BIN" ] || JAVA_BIN=$(command -v java)
   "$JAVA_BIN" -version 2>&1 | head -1

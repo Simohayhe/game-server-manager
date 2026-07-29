@@ -37,6 +37,39 @@ def pal_settings_tabs():
     return tabs
 
 
+def mc_settings_tabs(present_keys):
+    """MC_SETTINGS_TABS を SettingsEditor 用へ正規化する。
+
+    present_keys(=実際の server.properties のキー一覧)にあるキュレート項目だけを
+    日本語タブに載せ、キュレートに無い残りのキーは「その他」タブへ生キーで出す。
+    こうすると版差でキーが増減してもキー欠落は起きない。
+    """
+    from .settings_specs import MC_SETTINGS_TABS
+    present = set(present_keys or [])
+    covered = set()
+    tabs = []
+    for tabname, items in MC_SETTINGS_TABS:
+        fields = []
+        for key, typ, label, default, choices in items:
+            if present and key not in present:
+                continue          # この版に無いキーは出さない
+            covered.add(key)
+            f = {"id": key, "type": ("choice" if choices else typ),
+                 "label": label, "default": default}
+            if choices:
+                f["choices"] = choices
+            fields.append(f)
+        if fields:
+            tabs.append((tabname, fields))
+    # キュレートに無い残りのキー(上級者向け・生値)
+    others = [k for k in sorted(present) if k not in covered]
+    if others:
+        tabs.append(("その他(生値)",
+                     [{"id": k, "type": "str", "label": k, "default": ""}
+                      for k in others]))
+    return tabs
+
+
 class RconConsole(ctk.CTkToplevel):
     """RCONの手動コマンド送信コンソール。send_fn(cmd)->str を worker 経由で実行する。"""
 
@@ -410,7 +443,8 @@ class ProvisionDialog(ctk.CTkToplevel):
     SSHで全自動構築→config追記→一覧に即反映。
     """
 
-    def __init__(self, master, worker, templates_fn, provision_fn, vms_fn=None):
+    def __init__(self, master, worker, templates_fn, provision_fn, vms_fn=None,
+                 versions_fn=None, task_fn=None):
         super().__init__(master)
         self.title("新規サーバー構築")
         self.geometry("560x620")
@@ -419,6 +453,8 @@ class ProvisionDialog(ctk.CTkToplevel):
         self.templates_fn = templates_fn
         self.provision_fn = provision_fn
         self.vms_fn = vms_fn
+        self.versions_fn = versions_fn
+        self.task_fn = task_fn
         self._templates: list[dict] = []
         self._rows: dict = {}
 
@@ -443,7 +479,14 @@ class ProvisionDialog(ctk.CTkToplevel):
                                            command=self._on_tmpl)
         self.tmpl_menu.pack(anchor="w", padx=8, pady=(2, 4))
 
-        self._add_row(form, "mc_version", "MCバージョン", "26.2")
+        ctk.CTkLabel(form,
+                     text="MCバージョン(▼でホイールスクロール選択・直接入力/絞り込みも可)",
+                     text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=(6, 0))
+        from .widgets import ScrollCombo
+        self.version_combo = ScrollCombo(form, values=["26.2"], width=500)
+        self.version_combo.set("26.2")
+        self.version_combo.pack(anchor="w", padx=8, pady=(2, 0))
         self._add_row(form, "name", "サーバー名(英数字・config内で一意)", "minecraft4")
         self._add_row(form, "display_name", "表示名", "マイクラ4")
         self._add_row(form, "host", "構築先ホスト(VMのIP)", "192.168.11.103")
@@ -452,6 +495,17 @@ class ProvisionDialog(ctk.CTkToplevel):
         self._add_row(form, "ssh_password", "SSHパスワード", "", secret=True)
         self._add_row(form, "game_port", "ゲームポート", "25565")
         self._add_row(form, "motd", "MOTD(任意)", "A Minecraft Server")
+
+        # VMも新規作成(既存VMが無い場合)。ONにするとテンプレからクローン→個体化してから構築
+        self.create_vm_cb = ctk.CTkCheckBox(
+            form, text="🆕 このVMをテンプレートから新規作成する(上のIPにVMが無い場合はON)",
+            command=self._toggle_create_vm, font=ctk.CTkFont(size=12))
+        self.create_vm_cb.pack(anchor="w", padx=8, pady=(10, 2))
+        self.vm_frame = ctk.CTkFrame(form, fg_color="transparent")
+        self._add_row(self.vm_frame, "vm_template", "テンプレVM名", "ubuntu_template")
+        self._add_row(self.vm_frame, "template_ip", "テンプレのIP(起動直後)", "192.168.11.199")
+        self._add_row(self.vm_frame, "vm_memory_gb", "新VMメモリ(GB)", "4")
+        self._add_row(self.vm_frame, "vm_cpu", "新VM CPU数", "4")
 
         self.status = ctk.CTkLabel(self, text="", text_color=MUTED, wraplength=520,
                                    justify="left", font=ctk.CTkFont(size=11))
@@ -474,6 +528,12 @@ class ProvisionDialog(ctk.CTkToplevel):
             e.insert(0, default)
         e.pack(anchor="w", padx=8, pady=(2, 0))
         self._rows[key] = e
+
+    def _toggle_create_vm(self):
+        if self.create_vm_cb.get():
+            self.vm_frame.pack(fill="x", padx=0, pady=(0, 4))
+        else:
+            self.vm_frame.pack_forget()
 
     def _set(self, key, value):
         e = self._rows[key]
@@ -503,8 +563,25 @@ class ProvisionDialog(ctk.CTkToplevel):
         t = self._cur_template()
         if not t:
             return
-        self._set("mc_version", t.get("mc_version") or "")
+        self.version_combo.set(t.get("mc_version") or "")
         self._set("game_port", t.get("game_port") or 25565)
+        self._load_versions(t["id"])
+
+    def _load_versions(self, tid):
+        if not self.versions_fn:
+            return
+        self.status.configure(text="バージョン一覧を取得中…")
+
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            vers = (res or {}).get("versions") or []
+            if vers:
+                self.version_combo.set_values(vers)
+                self.status.configure(text=f"{len(vers)}個のバージョンから選択できます(▼でスクロール・直接入力も可)")
+            else:
+                self.status.configure(text="バージョン一覧を取得できませんでした(直接入力してください)")
+        self.worker.submit(lambda: self.versions_fn(tid), done)
 
     def _build(self):
         t = self._cur_template()
@@ -512,28 +589,53 @@ class ProvisionDialog(ctk.CTkToplevel):
             messagebox.showinfo("テンプレ未選択", "種別を選んでください", parent=self)
             return
         v = {k: e.get().strip() for k, e in self._rows.items()}
-        for req in ("name", "host", "ssh_user", "ssh_password"):
-            if not v.get(req):
-                messagebox.showinfo("入力不足", f"「{req}」を入力してください", parent=self)
+        v["mc_version"] = self.version_combo.get().strip()
+        create_vm = bool(self.create_vm_cb.get())
+        req = ["name", "host", "ssh_user", "ssh_password"]
+        if create_vm:
+            req += ["vm", "vm_template", "template_ip"]
+        for k in req:
+            if not v.get(k):
+                messagebox.showinfo("入力不足", f"「{k}」を入力してください", parent=self)
                 return
+        extra = (f"\n先に {v['vm_template']} から VM「{v['vm']}」を新規作成します"
+                 f"(IP {v['host']})。" if create_vm else "")
         if not messagebox.askyesno(
                 "構築の確認",
                 f"{v['host']} に {t['display_name']} {v['mc_version']} を構築します。\n"
-                f"サーバー名: {v['name']}\n数分かかります(📋タスクで進捗)。続けますか?",
+                f"サーバー名: {v['name']}{extra}\n数分かかります(📋タスクで進捗)。続けますか?",
                 default="no", parent=self):
             return
-        body = dict(v, template_id=t["id"])
+        body = dict(v, template_id=t["id"], create_vm=create_vm)
+        disp = v.get("display_name") or v["name"]
+        from .jobwait import watch_job, _last_log
 
-        def done(res, err):
+        def upd(state, task):
             if not self.winfo_exists():
                 return
-            if err:
-                self.status.configure(text=f"構築を開始できません: {err}")
-                messagebox.showerror("構築", str(err), parent=self)
-            else:
+            if state in ("submitted", "running"):
+                line = _last_log(task) if state == "running" else "受付"
+                self.status.configure(text=f"⏳ 構築中… {line or ''}", text_color=MUTED)
+            elif state == "success":
                 self.status.configure(
-                    text="構築を開始しました(📋タスクで進捗)。完了すると一覧に出ます。")
-        self.worker.submit(lambda: self.provision_fn(**body), done)
+                    text=f"✅ 構築成功: {disp} ({v['mc_version']}) を一覧に追加しました。",
+                    text_color="#7ee787")
+                messagebox.showinfo("構築完了",
+                                    f"{disp} ({v['mc_version']}) の構築に成功しました。",
+                                    parent=self)
+            else:  # failed / error
+                err = (task or {}).get("error") or "不明なエラー"
+                self.status.configure(text=f"❌ 構築失敗: {err}", text_color="#ff8f8f")
+                messagebox.showerror("構築失敗", str(err), parent=self)
+
+        if not self.task_fn:
+            # フォールバック(task_fn未指定): 投げるだけ
+            self.status.configure(text="構築を開始しました(📋タスクで進捗)。")
+            self.worker.submit(lambda: self.provision_fn(**body), lambda r, e: None)
+            return
+        self.status.configure(text="⏳ 構築を開始しています…", text_color=MUTED)
+        watch_job(self, self.worker, lambda: self.provision_fn(**body),
+                  self.task_fn, upd)
 
 
 class WorldResetDialog(ctk.CTkToplevel):
@@ -1361,7 +1463,7 @@ class SettingsEditor(ctk.CTkToplevel):
                  note: str = "", restart_label: str | None = None):
         super().__init__(master)
         self.title(title)
-        self.geometry("620x640")
+        self.geometry("780x640")
         self.configure(fg_color="#0f1115")
         self.worker = worker
         self.fetch_fn = fetch_fn
@@ -1377,16 +1479,30 @@ class SettingsEditor(ctk.CTkToplevel):
                          wraplength=580, justify="left",
                          font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(2, 0))
 
-        self.tabview = ctk.CTkTabview(self, fg_color=CARD)
-        self.tabview.pack(fill="both", expand=True, padx=10, pady=8)
+        # 横並びタブは項目(カテゴリ)が多いとラベルが潰れるため、左=縦ナビ / 右=内容 にする。
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=10, pady=8)
+        nav = ctk.CTkScrollableFrame(body, fg_color=CARD, width=184)
+        nav.pack(side="left", fill="y")
+        self._content = ctk.CTkFrame(body, fg_color=CARD)
+        self._content.pack(side="left", fill="both", expand=True, padx=(8, 0))
+        self._pages: dict = {}       # タブ名 -> 内容フレーム
+        self._nav_btns: dict = {}    # タブ名 -> ナビボタン
         for tabname, fields in tabs:
-            self.tabview.add(tabname)
-            frame = ctk.CTkScrollableFrame(self.tabview.tab(tabname),
-                                           fg_color="transparent")
-            frame.pack(fill="both", expand=True)
+            page = ctk.CTkScrollableFrame(self._content, fg_color="transparent")
+            self._pages[tabname] = page
             for f in fields:
                 self._fields[f["id"]] = f
-                self._add_field(frame, f)
+                self._add_field(page, f)
+            btn = ctk.CTkButton(
+                nav, text=tabname, anchor="w", height=32, corner_radius=6,
+                fg_color="transparent", hover_color="#2b303a", text_color=TEXT,
+                font=ctk.CTkFont(size=12),
+                command=lambda n=tabname: self._show_tab(n))
+            btn.pack(fill="x", pady=1)
+            self._nav_btns[tabname] = btn
+        if tabs:
+            self._show_tab(tabs[0][0])
 
         self.status = ctk.CTkLabel(self, text="現在値を読み込み中…", text_color=MUTED,
                                    font=ctk.CTkFont(size=11))
@@ -1406,6 +1522,13 @@ class SettingsEditor(ctk.CTkToplevel):
                       command=self.destroy).pack(side="right", padx=(0, 8))
         self.after(120, self.lift)
         self._load()
+
+    def _show_tab(self, name):
+        for page in self._pages.values():
+            page.pack_forget()
+        self._pages[name].pack(fill="both", expand=True)
+        for n, btn in self._nav_btns.items():
+            btn.configure(fg_color=ACCENT if n == name else "transparent")
 
     def _add_field(self, parent, f):
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1497,3 +1620,1097 @@ class SettingsEditor(ctk.CTkToplevel):
                 for fid in changes:          # 保存後は現在値=保存値に更新
                     self._widgets[fid][2] = changes[fid]
         self.worker.submit(lambda: self.save_fn(changes, restart), done)
+
+
+class McVersionDialog(ctk.CTkToplevel):
+    """MC既存ワールドのバージョン変更(アップグレード)。
+
+    現在版を表示 → 変更先(現在版より新しいもの)を選択 → mod互換性をプレビュー
+    → 実行(非対応modがあれば警告して確認)。実処理はサービス側のジョブで走る。
+    """
+
+    def __init__(self, master, server, client, worker, on_started=None):
+        super().__init__(master)
+        self.server = server
+        self.name = server["name"]
+        self.client = client
+        self.worker = worker
+        self.on_started = on_started
+        self._target = None
+
+        self.title(f"バージョン変更 — {server.get('display_name') or self.name}")
+        self.geometry("640x580")
+        self.configure(fg_color="#0f1115")
+
+        ctk.CTkLabel(self, text=f"🔀 {server.get('display_name') or self.name} バージョン変更",
+                     text_color=TEXT, font=ctk.CTkFont(size=15, weight="bold")).pack(
+            anchor="w", padx=14, pady=(12, 0))
+        ctk.CTkLabel(self, text="既存ワールドを新しいバージョンへアップグレードします。"
+                     "ダウングレードはできません。変更前に自動でバックアップを取ります。",
+                     text_color=MUTED, wraplength=600, justify="left",
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=14, pady=(2, 6))
+
+        self.cur_lbl = ctk.CTkLabel(self, text="現在のバージョン: 取得中…",
+                                    text_color=TEXT, font=ctk.CTkFont(size=12))
+        self.cur_lbl.pack(anchor="w", padx=14)
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(6, 4))
+        ctk.CTkLabel(row, text="変更先:", text_color=MUTED,
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(2, 6))
+        self.target_menu = ctk.CTkOptionMenu(row, values=["(取得中)"], width=200,
+                                             command=self._on_target,
+                                             font=ctk.CTkFont(size=12))
+        self.target_menu.pack(side="left")
+
+        self.body = ctk.CTkScrollableFrame(self, fg_color=CARD, height=300)
+        self.body.pack(fill="both", expand=True, padx=10, pady=8)
+        self.status = ctk.CTkLabel(self, text="", text_color=MUTED,
+                                   font=ctk.CTkFont(size=11))
+        self.status.pack(anchor="w", padx=14)
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=12, pady=(4, 12))
+        self.exec_btn = ctk.CTkButton(bar, text="⬆ このバージョンに変更", width=170,
+                                      height=34, corner_radius=6, fg_color=ACCENT,
+                                      hover_color="#4a86e0", command=self._execute,
+                                      state="disabled")
+        self.exec_btn.pack(side="right")
+        ctk.CTkButton(bar, text="閉じる", width=70, height=34, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self.destroy).pack(side="right", padx=(0, 8))
+        self.after(120, self.lift)
+        self._load()
+
+    def _load(self):
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.cur_lbl.configure(text=f"取得失敗: {err}", text_color="#ff8f8f")
+                return
+            cur = res.get("current") or "?"
+            choices = res.get("choices") or []
+            self.cur_lbl.configure(text=f"現在のバージョン: {cur}")
+            if choices:
+                self.target_menu.configure(values=choices)
+                self.target_menu.set(choices[0])
+                self._on_target(choices[0])
+            else:
+                self.target_menu.configure(values=["(アップグレード先なし)"])
+                self.target_menu.set("(アップグレード先なし)")
+                self.status.configure(text="既に最新の対応バージョンです。",
+                                      text_color=MUTED)
+        self.worker.submit(lambda: self.client.mc_versions(self.name), done)
+
+    def _on_target(self, val):
+        if not val or val.startswith("("):
+            return
+        self._target = val
+        self.exec_btn.configure(state="disabled")
+        for w in self.body.winfo_children():
+            w.destroy()
+        self.status.configure(text=f"{val} でのmod互換性を確認中…", text_color=MUTED)
+
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.status.configure(text=f"互換確認に失敗: {err}",
+                                      text_color="#ff8f8f")
+                return
+            self._render_plan(res)
+            self.exec_btn.configure(state="normal")
+        self.worker.submit(lambda: self.client.mc_version_plan(self.name, val), done)
+
+    def _render_plan(self, res):
+        mods = res.get("mods") or []
+        if not mods:
+            ctk.CTkLabel(self.body, text="このサーバーにmodはありません。安全にアップグレードできます。",
+                         text_color="#7ee787", font=ctk.CTkFont(size=12)).pack(
+                anchor="w", padx=6, pady=6)
+            self.status.configure(text="modなし。", text_color=MUTED)
+            return
+        groups = [
+            ("update", "✅ 自動更新される", "#7ee787"),
+            ("incompatible", "⚠ 対応版が無い(そのまま進むとクラッシュの可能性)", "#ff8f8f"),
+            ("unknown", "❓ 判定不可(Modrinth未登録・CF等。手動確認推奨)", "#ffd166"),
+        ]
+        n_bad = 0
+        for status, title, color in groups:
+            items = [m for m in mods if m.get("status") == status]
+            if not items:
+                continue
+            if status != "update":
+                n_bad += len(items)
+            ctk.CTkLabel(self.body, text=f"{title}  ({len(items)})",
+                         text_color=color, font=ctk.CTkFont(size=12, weight="bold")).pack(
+                anchor="w", padx=6, pady=(8, 2))
+            for m in items:
+                if status == "update" and m.get("new_entry"):
+                    txt = f"   • {m['name']}  {m.get('current','?')} → {m['new_entry'].get('version','?')}"
+                else:
+                    txt = f"   • {m['name']}  ({m.get('file','')})"
+                ctk.CTkLabel(self.body, text=txt, text_color="#d7dee6", anchor="w",
+                             wraplength=560, justify="left",
+                             font=ctk.CTkFont(size=11)).pack(anchor="w", padx=6)
+        self._n_bad = n_bad
+        if n_bad:
+            self.status.configure(
+                text=f"⚠ {n_bad}個のmodは目標版に対応していない可能性があります。",
+                text_color="#ffd166")
+        else:
+            self.status.configure(text="全modが対応版を持っています。安全にアップグレードできます。",
+                                  text_color="#7ee787")
+
+    def _execute(self):
+        target = self._target
+        if not target:
+            return
+        bad = getattr(self, "_n_bad", 0)
+        msg = (f"{self.server.get('display_name') or self.name} を {target} にアップグレードします。\n\n"
+               "・変更前に自動でワールドをバックアップします\n"
+               "・ワールドは新版起動時に自動アップグレードされます(元に戻せません)\n"
+               "・対応版のあるmodは自動更新します\n")
+        if bad:
+            msg += (f"\n⚠ {bad}個のmodは目標版に対応していない可能性があります。"
+                    "そのまま進めるとサーバーが起動しない/クラッシュする恐れがあります。"
+                    "これらのmodはそのまま残ります。\n")
+        msg += "\n実行しますか?"
+        if not messagebox.askyesno("バージョン変更の確認", msg,
+                                   icon="warning", default="no", parent=self):
+            return
+
+        from .jobwait import watch_job, _last_log
+        self.exec_btn.configure(state="disabled", text="変更中…")
+
+        def upd(state, task):
+            if not self.winfo_exists():
+                return
+            if state in ("submitted", "running"):
+                line = _last_log(task)
+                self.status.configure(text=f"⏳ {line or 'バージョン変更中…'}",
+                                      text_color=MUTED)
+            elif state == "success":
+                r = (task or {}).get("result") or {}
+                left = r.get("left_mods") or []
+                note = f"✅ {target} へのアップグレード成功。"
+                if left:
+                    note += f"\n未対応で残したmod: {', '.join(left)}"
+                self.status.configure(text=note, text_color="#7ee787")
+                self.exec_btn.configure(text="完了", state="disabled")
+                messagebox.showinfo("バージョン変更", note, parent=self)
+            else:
+                err = (task or {}).get("error") or "不明なエラー"
+                self.status.configure(text=f"❌ 失敗: {err}", text_color="#ff8f8f")
+                self.exec_btn.configure(state="normal", text="⬆ このバージョンに変更")
+                messagebox.showerror("バージョン変更 失敗", str(err), parent=self)
+        watch_job(self, self.worker,
+                  lambda: self.client.mc_version_change(self.name, target),
+                  self.client.task, upd)
+
+
+class DeleteServerDialog(ctk.CTkToplevel):
+    """サーバー削除。設定から削除のみ / VMごと完全削除 を選ぶ。
+
+    VM削除は不可逆(ワールド消失)なので、その時だけサーバー名の入力確認を求める。
+    """
+
+    def __init__(self, master, server, client, worker, on_done=None):
+        super().__init__(master)
+        self.server = server
+        self.name = server["name"]
+        self.vm = server.get("vm")
+        self.client = client
+        self.worker = worker
+        self.on_done = on_done
+        self.title(f"サーバー削除 — {server.get('display_name') or self.name}")
+        self.geometry("500x420")
+        self.configure(fg_color="#0f1115")
+
+        ctk.CTkLabel(self, text=f"🗑 {server.get('display_name') or self.name} を削除",
+                     text_color="#ff8f8f",
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w",
+                                                                    padx=16, pady=(14, 2))
+        ctk.CTkLabel(self, text="停止 → 外部公開停止 → クラスタから除外 → config.yamlから削除 を行います。",
+                     text_color=MUTED, wraplength=460, justify="left",
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16, pady=(0, 8))
+
+        # 削除前バックアップ(MC/Palworldはワールドをバックアップできる)。既定ON=安全側。
+        self.bk_cb = ctk.CTkCheckBox(
+            self, text="🗂 削除前にバックアップを取る(念のため残す)",
+            font=ctk.CTkFont(size=12))
+        if server.get("game") in ("minecraft", "palworld"):
+            self.bk_cb.select()
+            self.bk_cb.pack(anchor="w", padx=16, pady=(0, 6))
+
+        self.vm_cb = ctk.CTkCheckBox(
+            self, text=(f"VM「{self.vm}」ごと完全削除する(ワールドも消えて戻せません)"
+                        if self.vm else "VM情報なし"),
+            font=ctk.CTkFont(size=12), command=self._toggle)
+        if self.vm:
+            self.vm_cb.pack(anchor="w", padx=16, pady=(4, 4))
+
+        self.warn = ctk.CTkLabel(self, text="", text_color="#ffd166",
+                                 wraplength=460, justify="left",
+                                 font=ctk.CTkFont(size=11))
+        self.warn.pack(anchor="w", padx=16)
+        self.confirm_row = ctk.CTkFrame(self, fg_color="transparent")
+        ctk.CTkLabel(self.confirm_row, text=f"確認のため「{self.name}」と入力:",
+                     text_color=TEXT, font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 6))
+        self.confirm_entry = ctk.CTkEntry(self.confirm_row, width=180)
+        self.confirm_entry.pack(side="left")
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=14, pady=(16, 12), side="bottom")
+        self.del_btn = ctk.CTkButton(bar, text="削除する", width=110, height=34,
+                                     corner_radius=6, fg_color="#7a2530",
+                                     hover_color="#93303c", command=self._delete)
+        self.del_btn.pack(side="right")
+        ctk.CTkButton(bar, text="キャンセル", width=90, height=34, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self.destroy).pack(side="right", padx=(0, 8))
+        self.after(120, self.lift)
+
+    def _toggle(self):
+        if self.vm and self.vm_cb.get():
+            self.warn.configure(text="⚠ VMと仮想ディスクを削除します。ワールドは完全に消え、"
+                                "元に戻せません。")
+            self.confirm_row.pack(anchor="w", padx=16, pady=(6, 0))
+        else:
+            self.warn.configure(text="")
+            self.confirm_row.pack_forget()
+
+    def _delete(self):
+        del_vm = bool(self.vm and self.vm_cb.get())
+        if del_vm and self.confirm_entry.get().strip() != self.name:
+            messagebox.showerror("確認", f"「{self.name}」と正しく入力してください。",
+                                 parent=self)
+            return
+        if not del_vm:
+            if not messagebox.askyesno("削除の確認",
+                    f"{self.server.get('display_name') or self.name} をGSMの管理から削除します"
+                    "(VM・ワールドは残ります)。よろしいですか?",
+                    icon="warning", default="no", parent=self):
+                return
+        self.del_btn.configure(state="disabled", text="削除中…")
+        from .jobwait import watch_job, _last_log
+
+        def upd(state, task):
+            if not self.winfo_exists():
+                return
+            if state in ("submitted", "running"):
+                line = _last_log(task)
+                self.warn.configure(text=f"⏳ {line or '削除中…'}", text_color="#ffd166")
+            elif state == "success":
+                r = (task or {}).get("result") or {}
+                note = "✅ 削除しました。" + (" (VMも削除)" if r.get("vm_deleted") else "")
+                self.warn.configure(text=note, text_color="#7ee787")
+                messagebox.showinfo("サーバー削除", note, parent=self)
+                if callable(self.on_done):
+                    self.on_done()
+                self.destroy()
+            else:
+                err = (task or {}).get("error") or "不明なエラー"
+                self.warn.configure(text=f"❌ 失敗: {err}", text_color="#ff8f8f")
+                self.del_btn.configure(state="normal", text="削除する")
+                messagebox.showerror("サーバー削除 失敗", str(err), parent=self)
+        do_bk = bool(self.bk_cb.get())
+        watch_job(self, self.worker,
+                  lambda: self.client.server_delete(self.name, del_vm, do_bk),
+                  self.client.task, upd)
+
+
+class MemoryDialog(ctk.CTkToplevel):
+    """MCサーバーのメモリ変更(JVMヒープ + 任意でVM RAM)。"""
+
+    def __init__(self, master, server, client, worker, on_done=None):
+        super().__init__(master)
+        self.server = server
+        self.name = server["name"]
+        self.client = client
+        self.worker = worker
+        self.on_done = on_done
+        self.title(f"メモリ変更 — {server.get('display_name') or self.name}")
+        self.geometry("520x440")
+        self.configure(fg_color="#0f1115")
+
+        ctk.CTkLabel(self, text=f"🧠 {server.get('display_name') or self.name} メモリ変更",
+                     text_color=TEXT, font=ctk.CTkFont(size=15, weight="bold")).pack(
+            anchor="w", padx=16, pady=(14, 2))
+        self.cur = ctk.CTkLabel(self, text="現在の設定を取得中…", text_color=MUTED,
+                                wraplength=480, justify="left",
+                                font=ctk.CTkFont(size=11))
+        self.cur.pack(anchor="w", padx=16, pady=(0, 8))
+
+        form = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10)
+        form.pack(fill="x", padx=12, pady=4)
+        # Palworld等ネイティブサーバーはJVMヒープが無い=VMメモリのみ
+        self.is_native = server.get("game") == "palworld"
+        self.heap = None
+        if not self.is_native:
+            r1 = ctk.CTkFrame(form, fg_color="transparent")
+            r1.pack(fill="x", padx=12, pady=(12, 4))
+            ctk.CTkLabel(r1, text="JVMヒープ (GB):", text_color=TEXT, width=170,
+                         anchor="w", font=ctk.CTkFont(size=12)).pack(side="left")
+            self.heap = ctk.CTkEntry(r1, width=90)
+            self.heap.pack(side="left")
+            ctk.CTkLabel(r1, text="  ← MCサーバーが使うRAM(-Xmx)", text_color=MUTED,
+                         font=ctk.CTkFont(size=10)).pack(side="left")
+
+        self.vm_cb = ctk.CTkCheckBox(form, text="VMのメモリも変更する", command=self._toggle_vm,
+                                     font=ctk.CTkFont(size=12))
+        self.vm_row = ctk.CTkFrame(form, fg_color="transparent")
+        ctk.CTkLabel(self.vm_row, text="VMメモリ最大 (GB):", text_color=TEXT, width=170,
+                     anchor="w", font=ctk.CTkFont(size=12)).pack(side="left")
+        self.vm_gb = ctk.CTkEntry(self.vm_row, width=90)
+        self.vm_gb.pack(side="left")
+        self.dyn = ctk.CTkCheckBox(form, text="動的メモリを使う(推奨: 以後は再起動なしで変更可)",
+                                   font=ctk.CTkFont(size=11))
+        self.dyn.select()
+        if self.is_native:
+            # VMメモリ欄を常時表示(チェック省略)
+            self.vm_row.pack(fill="x", padx=12, pady=(12, 2))
+            self.dyn.pack(anchor="w", padx=12, pady=(4, 2))
+        else:
+            self.vm_cb.pack(anchor="w", padx=12, pady=(8, 2))
+
+        note = ("※動的メモリなら稼働中でも最大値をライブ変更(サービス無停止)。"
+                "静的や動的化はVM再起動を伴います。"
+                if self.is_native else
+                "※ヒープ変更はサービス再起動が必要。VMメモリは動的メモリなら"
+                "稼働中にライブ変更、静的や動的化はVM再起動を伴います。")
+        ctk.CTkLabel(form, text=note, text_color=MUTED, wraplength=470,
+                     justify="left",
+                     font=ctk.CTkFont(size=10)).pack(anchor="w", padx=12, pady=(8, 12))
+
+        self.status = ctk.CTkLabel(self, text="", text_color=MUTED,
+                                   font=ctk.CTkFont(size=11))
+        self.status.pack(anchor="w", padx=16, pady=(6, 0))
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=14, pady=(10, 12), side="bottom")
+        self.apply_btn = ctk.CTkButton(bar, text="変更する", width=110, height=34,
+                                       corner_radius=6, fg_color=ACCENT,
+                                       hover_color="#4a86e0", command=self._apply,
+                                       state="disabled")
+        self.apply_btn.pack(side="right")
+        ctk.CTkButton(bar, text="閉じる", width=80, height=34, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self.destroy).pack(side="right", padx=(0, 8))
+        self.after(120, self.lift)
+        self._load()
+
+    def _toggle_vm(self):
+        if self.vm_cb.get():
+            self.vm_row.pack(fill="x", padx=12, pady=(2, 2))
+            self.dyn.pack(anchor="w", padx=12, pady=(4, 2))
+        else:
+            self.vm_row.pack_forget()
+            self.dyn.pack_forget()
+
+    def _load(self):
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.cur.configure(text=f"取得失敗: {err}", text_color="#ff8f8f")
+                return
+            heap = (res or {}).get("heap", {})
+            vm = (res or {}).get("vm", {})
+            xmx_gb = round((heap.get("xmx_mb") or 0) / 1024, 1)
+            if self.heap is not None:
+                self.heap.delete(0, "end")
+                self.heap.insert(0, str(xmx_gb) if xmx_gb else "2")
+            head = "" if self.is_native else f"JVMヒープ {xmx_gb}GB / "
+            if vm:
+                mode = "動的" if vm.get("dynamic") else "静的"
+                size = vm.get("max_mb") if vm.get("dynamic") else vm.get("startup_mb")
+                self.cur.configure(
+                    text=f"現在: {head}VMメモリ {mode} "
+                         f"{round((size or 0)/1024,1)}GB (割当 {round((vm.get('assigned_mb') or 0)/1024,1)}GB, {vm.get('state')})")
+                self.vm_gb.delete(0, "end")
+                self.vm_gb.insert(0, str(round((size or 0) / 1024, 1)))
+                if vm.get("dynamic"):
+                    self.dyn.select()
+            else:
+                self.cur.configure(text=f"現在: {head}(VM情報なし)")
+            self.status.configure(
+                text="稼働中なら再起動して反映、停止中なら設定のみ適用(勝手に起動しません)。",
+                text_color=MUTED)
+            self.apply_btn.configure(state="normal")
+        self.worker.submit(lambda: self.client.mc_memory(self.name), done)
+
+    def _apply(self):
+        heap_gb = None
+        if not self.is_native:
+            try:
+                heap_gb = float(self.heap.get().strip())
+            except ValueError:
+                messagebox.showerror("メモリ変更", "ヒープGBを数値で入力してください",
+                                     parent=self)
+                return
+        vm_gb = None
+        dynamic = True
+        if self.is_native or self.vm_cb.get():
+            try:
+                vm_gb = float(self.vm_gb.get().strip())
+            except ValueError:
+                messagebox.showerror("メモリ変更", "VMメモリGBを数値で入力してください",
+                                     parent=self)
+                return
+            dynamic = bool(self.dyn.get())
+        if self.is_native:
+            note = f"VMメモリ最大を {vm_gb}GB に変更します" + \
+                   ("(動的・稼働中ならライブ=無停止)。" if dynamic
+                    else "(静的・VM再起動=サーバー停止を伴います)。")
+        else:
+            note = f"ヒープを {heap_gb}GB に変更します(サービス再起動)。"
+            if vm_gb is not None:
+                note += f"\nVMメモリ最大を {vm_gb}GB に変更します" + \
+                        ("(動的・可能ならライブ)。" if dynamic else "(静的・VM再起動)。")
+        if not messagebox.askyesno("メモリ変更の確認", note + "\n\n実行しますか?",
+                                   default="no", parent=self):
+            return
+        self.apply_btn.configure(state="disabled", text="変更中…")
+        from .jobwait import watch_job, _last_log
+
+        def upd(state, task):
+            if not self.winfo_exists():
+                return
+            if state in ("submitted", "running"):
+                line = _last_log(task)
+                self.status.configure(text=f"⏳ {line or 'メモリ変更中…'}",
+                                      text_color=MUTED)
+            elif state == "success":
+                r = (task or {}).get("result") or {}
+                how = {"live": "VMはライブ変更(再起動なし)", "restarted": "VM再起動で適用",
+                       "unchanged": "VMは変更なし",
+                       "applied": "停止中のため設定のみ適用(次回起動時に反映)"}.get(
+                           r.get("vm"), "")
+                what = (f"VMメモリ {vm_gb}GB" if self.is_native
+                        else f"ヒープ {heap_gb}GB")
+                note = f"✅ メモリ変更成功({what})。{how}"
+                self.status.configure(text=note, text_color="#7ee787")
+                self.apply_btn.configure(text="完了", state="disabled")
+                messagebox.showinfo("メモリ変更", note, parent=self)
+                if callable(self.on_done):
+                    self.on_done()
+            else:
+                err = (task or {}).get("error") or "不明なエラー"
+                self.status.configure(text=f"❌ 失敗: {err}", text_color="#ff8f8f")
+                self.apply_btn.configure(state="normal", text="変更する")
+                messagebox.showerror("メモリ変更 失敗", str(err), parent=self)
+        watch_job(self, self.worker,
+                  lambda: self.client.mc_memory_set(self.name, heap_gb, vm_gb, dynamic),
+                  self.client.task, upd)
+
+
+class ConfigExportDialog(ctk.CTkToplevel):
+    """設定のエクスポート。機密の扱い(暗号化/平文/除外)を選んでファイルに書き出す。"""
+
+    def __init__(self, master, client, worker):
+        super().__init__(master)
+        self.client = client
+        self.worker = worker
+        self.title("設定のエクスポート")
+        self.geometry("520x360")
+        self.configure(fg_color="#0f1115")
+
+        ctk.CTkLabel(self, text="⬆ 設定のエクスポート", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w",
+                                                                    padx=16, pady=(14, 2))
+        ctk.CTkLabel(self, text="config.yaml と各種状態を1ファイルにまとめて保存します。",
+                     text_color=MUTED, wraplength=480, justify="left",
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16, pady=(0, 8))
+
+        self.mode = tk.StringVar(value="enc")
+        for val, label in [
+            ("enc", "🔒 パスワードを含めて暗号化(推奨・完全復元/別PC移行向け)"),
+            ("plain", "📄 パスワードを含める(平文・取り扱い注意)"),
+            ("safe", "🧹 パスワードを含めない(共有向け・安全)")]:
+            ctk.CTkRadioButton(self, text=label, variable=self.mode, value=val,
+                               font=ctk.CTkFont(size=12),
+                               command=self._sync).pack(anchor="w", padx=20, pady=3)
+
+        prow = ctk.CTkFrame(self, fg_color="transparent")
+        prow.pack(anchor="w", padx=20, pady=(6, 2))
+        ctk.CTkLabel(prow, text="パスワード:", text_color=TEXT,
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
+        self.pw = ctk.CTkEntry(prow, width=220, show="●")
+        self.pw.pack(side="left")
+
+        self.msg = ctk.CTkLabel(self, text="", text_color="#ffd166",
+                                wraplength=480, justify="left",
+                                font=ctk.CTkFont(size=11))
+        self.msg.pack(anchor="w", padx=16, pady=(4, 0))
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=14, pady=(12, 12), side="bottom")
+        self.go = ctk.CTkButton(bar, text="エクスポート", width=130, height=34,
+                                corner_radius=6, fg_color=ACCENT, hover_color="#4a86e0",
+                                command=self._export)
+        self.go.pack(side="right")
+        ctk.CTkButton(bar, text="閉じる", width=90, height=34, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self.destroy).pack(side="right", padx=(0, 8))
+        self._sync()
+        self.after(120, self.lift)
+
+    def _sync(self):
+        self.pw.configure(state="normal" if self.mode.get() == "enc" else "disabled")
+
+    def _export(self):
+        mode = self.mode.get()
+        password = self.pw.get() if mode == "enc" else ""
+        if mode == "enc" and not password:
+            self.msg.configure(text="⚠ 暗号化にはパスワードを入力してください。")
+            return
+        with_secrets = mode in ("enc", "plain")
+        self.go.configure(state="disabled", text="作成中…")
+
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            self.go.configure(state="normal", text="エクスポート")
+            if err:
+                messagebox.showerror("エクスポート", str(err), parent=self)
+                return
+            import base64
+            from tkinter import filedialog
+            data = base64.b64decode(res["data"])
+            ext = ".gsmenc" if res.get("encrypted") else ".gsmbackup"
+            path = filedialog.asksaveasfilename(
+                parent=self, title="設定の保存先", initialfile=res["filename"],
+                defaultextension=ext,
+                filetypes=[("GSM設定", f"*{ext}"), ("すべて", "*.*")])
+            if not path:
+                return
+            try:
+                with open(path, "wb") as f:
+                    f.write(data)
+            except OSError as exc:
+                messagebox.showerror("保存失敗", str(exc), parent=self)
+                return
+            note = "🔒 暗号化して保存しました。" if res.get("encrypted") else "保存しました。"
+            messagebox.showinfo("エクスポート完了", f"{note}\n{path}", parent=self)
+            self.destroy()
+        self.worker.submit(
+            lambda: self.client.config_export(with_secrets, password), done)
+
+
+class ConfigImportDialog(ctk.CTkToplevel):
+    """設定のインポート。ファイルを選び、中身を確認してから取り込む(暗号化対応)。"""
+
+    def __init__(self, master, client, worker, on_done=None):
+        super().__init__(master)
+        self.client = client
+        self.worker = worker
+        self.on_done = on_done
+        self._data_b64 = None
+        self.title("設定のインポート")
+        self.geometry("540x380")
+        self.configure(fg_color="#0f1115")
+
+        ctk.CTkLabel(self, text="⬇ 設定のインポート", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w",
+                                                                    padx=16, pady=(14, 2))
+        frow = ctk.CTkFrame(self, fg_color="transparent")
+        frow.pack(fill="x", padx=16, pady=(4, 2))
+        self.file_lbl = ctk.CTkLabel(frow, text="ファイル未選択", text_color=MUTED,
+                                     font=ctk.CTkFont(size=11))
+        self.file_lbl.pack(side="left")
+        ctk.CTkButton(frow, text="📂 ファイルを選択", width=130, height=30,
+                      corner_radius=6, fg_color="#2b303a", hover_color="#39404d",
+                      command=self._pick).pack(side="right")
+
+        prow = ctk.CTkFrame(self, fg_color="transparent")
+        prow.pack(anchor="w", padx=16, pady=(6, 2))
+        ctk.CTkLabel(prow, text="パスワード:", text_color=TEXT,
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
+        self.pw = ctk.CTkEntry(prow, width=220, show="●")
+        self.pw.pack(side="left")
+        ctk.CTkButton(prow, text="中身を確認", width=90, height=28, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self._peek).pack(side="left", padx=8)
+
+        self.info = ctk.CTkLabel(self, text="", text_color="#d7dee6",
+                                 wraplength=500, justify="left",
+                                 font=ctk.CTkFont(size=11))
+        self.info.pack(anchor="w", padx=16, pady=(8, 0))
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=14, pady=(12, 12), side="bottom")
+        self.go = ctk.CTkButton(bar, text="取り込む", width=120, height=34,
+                                corner_radius=6, fg_color="#7a5a25",
+                                hover_color="#8f6a2c", state="disabled",
+                                command=self._import)
+        self.go.pack(side="right")
+        ctk.CTkButton(bar, text="キャンセル", width=90, height=34, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self.destroy).pack(side="right", padx=(0, 8))
+        self.after(120, self.lift)
+
+    def _pick(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self, title="取り込む設定ファイル",
+            filetypes=[("GSM設定", "*.gsmenc *.gsmbackup"), ("すべて", "*.*")])
+        if not path:
+            return
+        try:
+            import base64
+            with open(path, "rb") as f:
+                self._data_b64 = base64.b64encode(f.read()).decode("ascii")
+        except OSError as exc:
+            messagebox.showerror("読み込み失敗", str(exc), parent=self)
+            return
+        import os
+        self.file_lbl.configure(text=os.path.basename(path), text_color=TEXT)
+        self.go.configure(state="disabled")
+        self.info.configure(text="")
+        self._peek()
+
+    def _peek(self):
+        if not self._data_b64:
+            self.info.configure(text="⚠ 先にファイルを選択してください。", text_color="#ffd166")
+            return
+
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.info.configure(text=f"❌ {err}", text_color="#ff8f8f")
+                self.go.configure(state="disabled")
+                return
+            if res.get("need_password"):
+                self.info.configure(text="🔒 暗号化されています。パスワードを入力して"
+                                     "「中身を確認」を押してください。", text_color="#ffd166")
+                self.go.configure(state="disabled")
+                return
+            m = res.get("manifest") or {}
+            files = ", ".join(m.get("files", []))
+            sec = "含む" if m.get("with_secrets", True) else "含まない(サニタイズ済)"
+            self.info.configure(
+                text=f"✅ 読み込み可能です。\n作成: {m.get('created','?')}\n"
+                     f"機密情報: {sec}\n対象: {files}", text_color="#7ee787")
+            self.go.configure(state="normal")
+        self.worker.submit(
+            lambda: self.client.config_peek(self._data_b64, self.pw.get()), done)
+
+    def _import(self):
+        if not messagebox.askyesno(
+                "設定のインポート",
+                "現在の設定を上書きします(取り込み前に自動バックアップされます)。\n"
+                "続行しますか?", icon="warning", default="no", parent=self):
+            return
+        self.go.configure(state="disabled", text="取り込み中…")
+        from .jobwait import watch_job, _last_log
+
+        def upd(state, task):
+            if not self.winfo_exists():
+                return
+            if state in ("submitted", "running"):
+                line = _last_log(task)
+                self.info.configure(text=f"⏳ {line or '取り込み中…'}", text_color="#ffd166")
+            elif state == "success":
+                r = (task or {}).get("result") or {}
+                self.info.configure(
+                    text="✅ 取り込みました。全設定を反映するにはサービス再起動を。\n"
+                         f"取り込み前の設定: {r.get('backup','')}", text_color="#7ee787")
+                messagebox.showinfo(
+                    "インポート完了",
+                    "設定を取り込みました。\n通知・予約なども反映するには"
+                    "ヘッダーの「🔄 サービス再起動」を押してください。", parent=self)
+                if callable(self.on_done):
+                    self.on_done()
+                self.destroy()
+            else:
+                err = (task or {}).get("error") or "不明なエラー"
+                self.info.configure(text=f"❌ 失敗: {err}", text_color="#ff8f8f")
+                self.go.configure(state="normal", text="取り込む")
+                messagebox.showerror("インポート失敗", str(err), parent=self)
+        watch_job(self, self.worker,
+                  lambda: self.client.config_import(self._data_b64, self.pw.get()),
+                  self.client.task, upd)
+
+
+class BanManageDialog(ctk.CTkToplevel):
+    """BAN/キック/BAN解除/BANリスト/ホワイトリスト(MC/Palworld/ARK共通)。
+
+    call(action, target, reason) -> dict を渡す(ブロッキングのクライアント呼び出し)。
+    game で表示項目を切替(Palworldはban/kickのみ、ARK/MCはunban/リスト/許可リストも)。
+    """
+
+    def __init__(self, master, title, game, call, worker):
+        super().__init__(master)
+        self.call = call
+        self.worker = worker
+        self.game = game
+        self.title(f"BAN管理 — {title}")
+        self.geometry("600x640")
+        self.configure(fg_color="#0f1115")
+        hint = {"minecraft": "プレイヤー名", "palworld": "SteamID",
+                "ark": "EOS ID(32桁hex) または 名前"}.get(game, "対象")
+        full = game in ("minecraft", "ark")
+
+        ctk.CTkLabel(self, text=f"🚫 BAN管理 — {title}", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w",
+                                                                    padx=16, pady=(14, 0))
+        ctk.CTkLabel(self, text=f"対象の指定方法: {hint}", text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16, pady=(0, 6))
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=(2, 4))
+        self.target = ctk.CTkEntry(row, width=320, placeholder_text=hint)
+        self.target.pack(side="left")
+        self.reason = None
+        if game == "minecraft":
+            self.reason = ctk.CTkEntry(row, width=170, placeholder_text="理由(任意)")
+            self.reason.pack(side="left", padx=8)
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=16, pady=(2, 4))
+        self._mkbtn(bar, "⛔ BAN", "ban", "#7a2530", "#93303c")
+        self._mkbtn(bar, "🚫 キック", "kick", "#5a4a25", "#6d5a2c")
+        if full:
+            self._mkbtn(bar, "✅ BAN解除", "unban", "#2b303a", "#39404d")
+        if game == "minecraft":
+            self._mkbtn(bar, "🌐 IPごとBAN", "banip", "#7a2530", "#93303c")
+
+        if full:
+            wl = ctk.CTkFrame(self, fg_color="transparent")
+            wl.pack(fill="x", padx=16, pady=(2, 4))
+            ctk.CTkLabel(wl, text="ホワイトリスト(許可制):", text_color=TEXT,
+                         font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
+            self._mkbtn(wl, "＋許可に追加", "wl_add", "#26543a", "#2f6647")
+            self._mkbtn(wl, "－許可から外す", "wl_remove", "#2b303a", "#39404d")
+            if game == "minecraft":
+                self._mkbtn(wl, "許可制ON", "wl_on", "#2b303a", "#39404d")
+                self._mkbtn(wl, "OFF", "wl_off", "#2b303a", "#39404d")
+
+        self.msg = ctk.CTkLabel(self, text="", text_color="#d7dee6",
+                                wraplength=560, justify="left",
+                                font=ctk.CTkFont(size=11))
+        self.msg.pack(anchor="w", padx=16, pady=(6, 2))
+
+        if game == "palworld":
+            ctk.CTkLabel(self, text="※ PalworldはRCONでBAN/キックのみ対応(解除は手動)。",
+                         text_color=MUTED, font=ctk.CTkFont(size=11)).pack(anchor="w",
+                                                                           padx=16)
+        else:
+            note = ("※ ARKは停止中でもBAN/解除できます(BanList.txtへ記録、次回起動で反映)。"
+                    if game == "ark" else
+                    "※ RCON操作のためサーバーが起動している必要があります。")
+            ctk.CTkLabel(self, text=note, text_color=MUTED,
+                         font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16)
+            ctk.CTkLabel(self, text="現在のBANリスト", text_color=TEXT,
+                         font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w",
+                                                                        padx=16, pady=(8, 2))
+            self.lb = tk.Listbox(self, height=9, bg=CARD, fg="#e6edf3",
+                                 selectbackground="#2f5c9e", selectforeground="#ffffff",
+                                 highlightthickness=0, bd=0, activestyle="none",
+                                 font=(ctk.ThemeManager.theme["CTkFont"]["family"], 10))
+            self.lb.pack(fill="both", expand=True, padx=16)
+            brow = ctk.CTkFrame(self, fg_color="transparent")
+            brow.pack(fill="x", padx=16, pady=(4, 12))
+            ctk.CTkButton(brow, text="🔄 一覧更新", width=100, height=30, corner_radius=6,
+                          fg_color="#2b303a", hover_color="#39404d",
+                          command=self._load_banlist).pack(side="left")
+            ctk.CTkButton(brow, text="選択をBAN解除", width=120, height=30, corner_radius=6,
+                          fg_color="#26543a", hover_color="#2f6647",
+                          command=self._unban_selected).pack(side="left", padx=8)
+            self._load_banlist()
+        self.after(120, self.lift)
+
+    def _mkbtn(self, parent, text, action, fg, hv):
+        ctk.CTkButton(parent, text=text, width=90, height=32, corner_radius=6,
+                      fg_color=fg, hover_color=hv, font=ctk.CTkFont(size=12),
+                      command=lambda: self._run(action)).pack(side="left", padx=(0, 6))
+
+    def _run(self, action):
+        target = self.target.get().strip()
+        reason = self.reason.get().strip() if self.reason else ""
+        if action not in ("banlist", "wl_on", "wl_off", "wl_list") and not target:
+            self.msg.configure(text="⚠ 対象を入力してください。", text_color="#ffd166")
+            return
+        self.msg.configure(text="実行中…", text_color="#ffd166")
+
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.msg.configure(text=f"❌ {err}", text_color="#ff8f8f")
+                return
+            note = (res or {}).get("message") or (res or {}).get("response") or "完了しました"
+            self.msg.configure(text=f"✅ {note}", text_color="#7ee787")
+            if action in ("ban", "unban") and self.game in ("minecraft", "ark"):
+                self._load_banlist()
+        self.worker.submit(lambda: self.call(action, target, reason), done)
+
+    def _load_banlist(self):
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            self.lb.delete(0, "end")
+            if err:
+                self.lb.insert("end", f"(取得失敗: {err})")
+                return
+            banned = (res or {}).get("banned")
+            if banned is None:                          # MC: RCONテキスト
+                txt = ((res or {}).get("response") or "").strip()
+                lines = [l for l in txt.splitlines() if l.strip()] or [txt or "(BANなし)"]
+                for l in lines:
+                    self.lb.insert("end", l)
+            else:                                       # ARK: IDの配列
+                if not banned:
+                    self.lb.insert("end", "(BANなし)")
+                for b in banned:
+                    self.lb.insert("end", b)
+        self.worker.submit(lambda: self.call("banlist", "", ""), done)
+
+    def _unban_selected(self):
+        sel = self.lb.curselection()
+        if not sel:
+            self.msg.configure(text="⚠ 一覧から解除する行を選んでください。",
+                               text_color="#ffd166")
+            return
+        val = self.lb.get(sel[0]).strip()
+        if val.startswith("("):
+            return
+        self.target.delete(0, "end")
+        self.target.insert(0, val)
+        self._run("unban")
+
+
+class ArkMapSettingsDialog(ctk.CTkToplevel):
+    """ARKマップ固有設定(例: Ragnarokの火山)。選択したマップのconfigにだけ書き込む。
+
+    全マップ共通の「⚙ 詳細設定」とは別。ここはそのマップの GameUserSettings.ini の
+    マップ名セクション([Ragnarok]等)に書くので、他マップには影響しない。
+    """
+
+    def __init__(self, master, display, idx, client, worker):
+        super().__init__(master)
+        self.client = client
+        self.worker = worker
+        self.idx = idx
+        self.rows = {}
+        self.title(f"マップ固有設定 — {display}")
+        self.geometry("560x520")
+        self.configure(fg_color="#0f1115")
+
+        ctk.CTkLabel(self, text=f"🌋 マップ固有設定 — {display}", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w",
+                                                                    padx=16, pady=(14, 2))
+        ctk.CTkLabel(self, text="このマップだけに効く設定です(他マップには影響しません)。"
+                     "反映には再起動が必要。稼働中は停止時に上書きされるので、"
+                     "確実に効かせるなら停止中に変更してください。",
+                     text_color=MUTED, wraplength=520, justify="left",
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16, pady=(0, 8))
+
+        self.body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.body.pack(fill="both", expand=True, padx=8)
+
+        self.msg = ctk.CTkLabel(self, text="読み込み中…", text_color=MUTED,
+                                wraplength=520, justify="left",
+                                font=ctk.CTkFont(size=11))
+        self.msg.pack(anchor="w", padx=16, pady=(4, 2))
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=14, pady=(6, 12), side="bottom")
+        self.save_btn = ctk.CTkButton(bar, text="💾 保存", width=110, height=34,
+                                      corner_radius=6, fg_color=ACCENT,
+                                      hover_color="#4a86e0", state="disabled",
+                                      command=self._save)
+        self.save_btn.pack(side="right")
+        ctk.CTkButton(bar, text="閉じる", width=90, height=34, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self.destroy).pack(side="right", padx=(0, 8))
+        self._load()
+        self.after(120, self.lift)
+
+    def _load(self):
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            if err:
+                self.msg.configure(text=f"❌ 取得失敗: {err}", text_color="#ff8f8f")
+                return
+            settings = (res or {}).get("settings") or []
+            if not settings:
+                self.msg.configure(text="このマップに固有設定はありません。",
+                                   text_color=MUTED)
+                return
+            for s in settings:
+                self._row(s)
+            self.msg.configure(
+                text="空欄は既定値で動きます。値を入れて保存すると固定されます。",
+                text_color=MUTED)
+            self.save_btn.configure(state="normal")
+        self.worker.submit(lambda: self.client.ark_mapsettings(self.idx), done)
+
+    def _row(self, s):
+        key, typ = s["key"], s["type"]
+        cur, default = s.get("current", ""), s.get("default", "")
+        frame = ctk.CTkFrame(self.body, fg_color=CARD, corner_radius=8)
+        frame.pack(fill="x", pady=3, padx=4)
+        ctk.CTkLabel(frame, text=s["label"], text_color=TEXT, anchor="w",
+                     wraplength=380, justify="left",
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=12, pady=8)
+        if typ == "bool":
+            sw = ctk.CTkSwitch(frame, text="", onvalue="True", offvalue="False",
+                               width=48)
+            on = str(cur or default).strip().lower() in ("true", "1")
+            (sw.select if on else sw.deselect)()
+            sw.pack(side="right", padx=12)
+            self.rows[key] = (sw, typ, default)
+        else:
+            e = ctk.CTkEntry(frame, width=110,
+                             placeholder_text=f"既定 {default}")
+            if cur not in ("", None):
+                e.insert(0, str(cur))
+            e.pack(side="right", padx=12)
+            self.rows[key] = (e, typ, default)
+
+    def _save(self):
+        changes = {}
+        for key, (w, typ, default) in self.rows.items():
+            if typ == "bool":
+                changes[key] = w.get()               # "True"/"False"
+            else:
+                v = w.get().strip()
+                if v == "":
+                    continue                          # 空欄は書かない(既定のまま)
+                try:
+                    float(v)
+                except ValueError:
+                    self.msg.configure(text=f"⚠ {key} は数値で入力してください。",
+                                       text_color="#ffd166")
+                    return
+                changes[key] = v
+        if not changes:
+            self.msg.configure(text="変更がありません。", text_color="#ffd166")
+            return
+        self.save_btn.configure(state="disabled", text="保存中…")
+
+        def done(res, err):
+            if not self.winfo_exists():
+                return
+            self.save_btn.configure(state="normal", text="💾 保存")
+            if err:
+                self.msg.configure(text=f"❌ 保存失敗: {err}", text_color="#ff8f8f")
+                return
+            self.msg.configure(
+                text=f"✅ 保存しました({(res or {}).get('changed', 0)}項目)。"
+                     "次回起動で反映されます。", text_color="#7ee787")
+        self.worker.submit(
+            lambda: self.client.ark_mapsettings_set(self.idx, changes), done)
+
+
+class HostRestartDialog(ctk.CTkToplevel):
+    """このサーバーPCを再起動する。ARKは保存停止→再起動後に自動復帰、VMはHyper-V任せ。"""
+
+    def __init__(self, master, client, worker):
+        super().__init__(master)
+        self.client = client
+        self.worker = worker
+        self.title("PCを再起動")
+        self.geometry("580x470")
+        self.configure(fg_color="#0f1115")
+
+        ctk.CTkLabel(self, text="🖥 このPCを再起動", text_color="#ff8f8f",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w",
+                                                                    padx=16, pady=(14, 4))
+        ctk.CTkLabel(self, text=(
+            "このサーバーPCを再起動します。実行内容:\n"
+            "・ARK(稼働中の全マップ)は saveworld して停止 → 再起動後に自動で元通り起動\n"
+            "・VM(Palworld / Minecraft)は Hyper-V が状態を保存し、起動時に自動復帰\n"
+            "・接続中のプレイヤーは切断されます(事前に予告します)\n"
+            "・GSM(この画面)も一度終了し、ログイン後にサービスが自動で戻ります"),
+            text_color=MUTED, wraplength=540, justify="left",
+            font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(0, 8))
+
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(anchor="w", padx=16, pady=(2, 4))
+        ctk.CTkLabel(row, text="予告カウントダウン(秒):", text_color=TEXT,
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 8))
+        self.delay = ctk.CTkEntry(row, width=80)
+        self.delay.insert(0, "60")
+        self.delay.pack(side="left")
+        ctk.CTkLabel(row, text="  (0で即時。カウントダウン中はキャンセルできます)",
+                     text_color=MUTED, font=ctk.CTkFont(size=11)).pack(side="left")
+
+        self.msg = ctk.CTkLabel(self, text="", text_color="#d7dee6",
+                                wraplength=540, justify="left",
+                                font=ctk.CTkFont(size=12))
+        self.msg.pack(anchor="w", padx=16, pady=(8, 2))
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=14, pady=(10, 14), side="bottom")
+        self.go_btn = ctk.CTkButton(bar, text="🖥 再起動する", width=130, height=36,
+                                    corner_radius=6, fg_color="#7a2530",
+                                    hover_color="#93303c", command=self._start)
+        self.go_btn.pack(side="right")
+        self.cancel_btn = ctk.CTkButton(bar, text="カウントダウンをキャンセル", width=200,
+                                        height=36, corner_radius=6, fg_color="#2b303a",
+                                        hover_color="#39404d", state="disabled",
+                                        command=self._cancel)
+        self.cancel_btn.pack(side="right", padx=(0, 8))
+        self.close_btn = ctk.CTkButton(bar, text="閉じる", width=80, height=36,
+                                       corner_radius=6, fg_color="#2b303a",
+                                       hover_color="#39404d", command=self.destroy)
+        self.close_btn.pack(side="left")
+        self.after(120, self.lift)
+
+    def _start(self):
+        try:
+            delay = max(0, int(self.delay.get().strip() or "60"))
+        except ValueError:
+            self.msg.configure(text="⚠ 予告秒数は数値で入力してください。",
+                               text_color="#ffd166")
+            return
+        if not messagebox.askyesno(
+                "PC再起動の確認",
+                f"このPCを {delay} 秒後に再起動します。\n"
+                "ARKは保存停止して再起動後に自動復帰、VMも自動復帰します。\n"
+                "接続中のプレイヤーは切断されます。実行しますか?",
+                icon="warning", default="no", parent=self):
+            return
+        self.go_btn.configure(state="disabled")
+        self.delay.configure(state="disabled")
+        self.cancel_btn.configure(state="normal")
+        from .jobwait import watch_job, _last_log
+
+        def upd(state, task):
+            if not self.winfo_exists():
+                return
+            if state in ("submitted", "running"):
+                line = _last_log(task)
+                self.msg.configure(text=f"⏳ {line or '準備中…'}", text_color="#ffd166")
+            elif state == "success":
+                r = (task or {}).get("result") or {}
+                if r.get("cancelled"):
+                    self.msg.configure(text="✅ 再起動を中止しました。", text_color="#7ee787")
+                    self.go_btn.configure(state="normal")
+                    self.delay.configure(state="normal")
+                    self.cancel_btn.configure(state="disabled")
+                else:
+                    self.msg.configure(
+                        text="🖥 PCを再起動しています…(この画面は間もなく切断されます。"
+                             "ログイン後にサービスが自動で復帰します)",
+                        text_color="#7ee787")
+                    self.cancel_btn.configure(state="disabled")
+            else:
+                err = (task or {}).get("error") or "不明なエラー"
+                self.msg.configure(text=f"❌ 失敗: {err}", text_color="#ff8f8f")
+                self.go_btn.configure(state="normal")
+                self.delay.configure(state="normal")
+                self.cancel_btn.configure(state="disabled")
+        watch_job(self, self.worker,
+                  lambda: self.client.host_restart(delay),
+                  self.client.task, upd)
+
+    def _cancel(self):
+        self.cancel_btn.configure(state="disabled", text="キャンセル中…")
+        self.worker.submit(self.client.host_restart_cancel,
+                           lambda res, err: None)

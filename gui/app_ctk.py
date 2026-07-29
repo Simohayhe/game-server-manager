@@ -198,6 +198,7 @@ class Page(ctk.CTkFrame):
         self.worker = app.worker
         self._alive = True
         self._visible = False
+        self._poll_gen = 0                 # ポーリング世代(多重実行防止)
         self._polls: list[tuple] = []      # (fn, ok, ms) 表示中だけ回す
         self.build()
 
@@ -214,18 +215,25 @@ class Page(ctk.CTkFrame):
                                                                     pady=(0, 10))
 
     # ---- 表示/非表示 ----
+    # ポーリングは「世代(_poll_gen)」で管理する。表示/非表示のたびに世代を進め、
+    # 古い世代の連鎖は自然消滅させる。これをしないと、表示→非表示→再表示を
+    # ポーリング間隔内に行ったとき、古い連鎖が生き返って多重に走り、画面が
+    # 何度も再描画されてチラつく(バックアップ画面で顕著だった)。
     def on_show(self) -> None:
         if self._visible:
             return
         self._visible = True
+        self._poll_gen += 1
+        gen = self._poll_gen
         for spec in self._polls:
-            self._run_poll(spec)
+            self._run_poll(spec, gen)
         log = getattr(self, "log", None)
         if log is not None:
             log.start()
 
     def on_hide(self) -> None:
-        self._visible = False          # 次のtickで自然に止まる
+        self._visible = False
+        self._poll_gen += 1            # 走っている連鎖を無効化(古い世代は止まる)
         log = getattr(self, "log", None)
         if log is not None:
             log.stop()                 # ライブログの追尾も止める(3秒毎の無駄を消す)
@@ -235,26 +243,39 @@ class Page(ctk.CTkFrame):
         spec = (fn, ok, ms)
         self._polls.append(spec)
         if self._visible:
-            self._run_poll(spec)
+            self._run_poll(spec, self._poll_gen)
 
-    def _run_poll(self, spec) -> None:
+    def _run_poll(self, spec, gen) -> None:
         fn, ok, ms = spec
 
         def done(res, err):
-            if not self._alive or not self.winfo_exists() or not self._visible:
-                return                 # 非表示になったら止める
+            # 非表示になった/世代が変わった連鎖はここで止める(多重実行を防ぐ)
+            if (not self._alive or not self.winfo_exists()
+                    or not self._visible or gen != self._poll_gen):
+                return
             if err is None:
                 ok(res)
-            self.after(ms, lambda: self._run_poll(spec) if self._visible else None)
+            self.after(ms, lambda: (self._run_poll(spec, gen)
+                                    if self._visible and gen == self._poll_gen
+                                    else None))
         self.worker.submit(fn, done)
 
     def act(self, fn, label):
-        def done(res, err):
-            if err:
+        """操作を投げ、裏のタスクが成功/失敗するまで見届けて結果を表示する。"""
+        from .jobwait import watch_job, _last_log
+        self.app.toast(f"{label}… 実行中")
+
+        def upd(state, task):
+            if state == "running":
+                line = _last_log(task)
+                self.app.toast(f"{label}… {line}" if line else f"{label}… 実行中")
+            elif state == "success":
+                self.app.toast(f"✅ {label} 成功")
+            elif state in ("failed", "error"):
+                err = (task or {}).get("error") or "不明なエラー"
+                self.app.toast(f"❌ {label} 失敗")
                 messagebox.showerror(label, str(err), parent=self)
-            else:
-                self.app.toast(f"{label} を受け付けました(📋タスクで進捗)")
-        self.worker.submit(fn, done)
+        watch_job(self, self.worker, fn, self.client.task, upd)
 
     def bar(self):
         b = ctk.CTkFrame(self, fg_color="transparent")
@@ -343,7 +364,15 @@ class ArkPage(Page):
             opts, text="🦕 再起動時に野生恐竜をリスポーン", onvalue=True, offvalue=False,
             command=self._set_respawn, font=ctk.CTkFont(size=12))
         self.respawn_sw.pack(side="left")
-        ctk.CTkLabel(opts, text="  複数選択(Ctrl/Shift)で一括操作・起動/更新は1マップずつ",
+        ctk.CTkLabel(opts, text="   🎃 イベント:", text_color=MUTED,
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(12, 2))
+        self.event_menu = ctk.CTkOptionMenu(
+            opts, values=["なし(通常)"], command=self._set_event,
+            width=210, font=ctk.CTkFont(size=12))
+        self.event_menu.pack(side="left")
+        self._ev_l2v: dict[str, str] = {}   # ラベル→値
+        self._ev_v2l: dict[str, str] = {}   # 値→ラベル
+        ctk.CTkLabel(opts, text="  (全マップ・次回起動時に反映)",
                      text_color=MUTED, font=ctk.CTkFont(size=11)).pack(side="left")
         self.attach_menu(self.t, self._menu_items)
         self.upd_banner = ctk.CTkLabel(self, text="", text_color=MUTED, anchor="w",
@@ -358,6 +387,7 @@ class ArkPage(Page):
         self.poll(self.client.ark_meta, self._fill)
         self._respawn_on_restart = False
         self.worker.submit(self.client.ark_behavior, self._apply_respawn)  # 現在値を反映
+        self.worker.submit(self.client.ark_event, self._apply_event)       # イベント現在値
 
     def _apply_respawn(self, res, err):
         if err or not self.respawn_sw.winfo_exists():
@@ -377,6 +407,35 @@ class ArkPage(Page):
             self.app.toast(f"再起動時の恐竜リスポーン: "
                            f"{'ON' if self._respawn_on_restart else 'OFF'}")
         self.worker.submit(lambda: self.client.ark_behavior_set(want), done)
+
+    def _apply_event(self, res, err):
+        if err or not self.event_menu.winfo_exists():
+            return
+        choices = res.get("choices") or [{"value": "", "label": "なし(通常)"}]
+        self._ev_l2v = {c["label"]: c["value"] for c in choices}
+        self._ev_v2l = {c["value"]: c["label"] for c in choices}
+        self._event_note = res.get("note", "")
+        self.event_menu.configure(values=[c["label"] for c in choices])
+        cur = res.get("event", "")
+        self.event_menu.set(self._ev_v2l.get(cur, "なし(通常)"))
+
+    def _set_event(self, label):
+        value = self._ev_l2v.get(label, "")
+
+        def done(res, err):
+            if err:
+                messagebox.showerror("イベント", str(err), parent=self)
+                self.worker.submit(self.client.ark_event, self._apply_event)  # 元に戻す
+                return
+            ev = res.get("event", "")
+            shown = self._ev_v2l.get(ev, "なし(通常)")
+            self.app.toast(f"ARKイベントを「{shown}」に設定(次回起動時に全マップへ反映)")
+            if ev:            # イベントを有効化したときは反映条件を案内
+                messagebox.showinfo(
+                    "ARKイベントの反映について",
+                    getattr(self, "_event_note", "")
+                    or "設定は次回のGSM起動で反映されます。", parent=self)
+        self.worker.submit(lambda: self.client.ark_event_set(value), done)
 
     def _fill(self, meta):
         rows = meta["ark"] if isinstance(meta, dict) else meta
@@ -502,11 +561,19 @@ class ArkPage(Page):
         if not a:
             return []
         idx = a["index"]
-        return [
+        from core.arkconfig import ARK_MAP_SETTINGS
+        items = [
             ("✏ 別名を変更", self._rename),
             ("🎮 プレイヤーにコマンド(飛行/無敵ほか)", lambda: self._player_cmd(idx)),
+            ("🚫 BAN管理(BAN/キック/許可リスト)",
+             lambda: self._ban_manage(idx, a["display_name"])),
             ("💬 RCONコンソール", self._rcon_console),
             ("⚙ 詳細設定(全マップ共通)", self._settings),
+        ]
+        if a.get("map_label") in ARK_MAP_SETTINGS:      # 固有設定があるマップだけ
+            items.append(("🌋 マップ固有設定(このマップのみ)",
+                          lambda: self._map_settings(idx, a["display_name"])))
+        items += [
             ("⚡ 動的設定(無停止・色/倍率)", self._dynconfig),
             ("📝 生設定ファイル編集(上級者)", self._raw_settings),
             ("💾 バックアップ/復元", self._backup_dialog),
@@ -518,6 +585,7 @@ class ArkPage(Page):
             ("☀ 昼にする", lambda: self._quick(idx, "day", "昼")),
             ("🌙 夜にする", lambda: self._quick(idx, "night", "夜")),
         ]
+        return items
 
     def _sel_silent(self):
         s = self.t.selection()
@@ -533,6 +601,18 @@ class ArkPage(Page):
         RconConsole(self.winfo_toplevel(), a["display_name"], self.worker,
                     lambda cmd: self.client.ark_rcon(a["index"], cmd),
                     hints=[("保存", "saveworld"), ("人数", "ListPlayers")])
+
+    def _ban_manage(self, idx, display):
+        from .dialogs import BanManageDialog
+        BanManageDialog(
+            self.winfo_toplevel(), display, "ark",
+            lambda action, target, reason: self.client.ark_moderate(idx, action, target),
+            self.worker)
+
+    def _map_settings(self, idx, display):
+        from .dialogs import ArkMapSettingsDialog
+        ArkMapSettingsDialog(self.winfo_toplevel(), display, idx,
+                             self.client, self.worker)
 
     def _rename(self):
         a = self._sel_silent()
@@ -648,7 +728,9 @@ class ServerPage(Page):
             self.winfo_toplevel(), self.worker,
             templates_fn=self.client.provision_templates,
             provision_fn=self.client.provision,
-            vms_fn=self.client.vms)
+            vms_fn=self.client.vms,
+            versions_fn=self.client.provision_versions,
+            task_fn=self.client.task)
 
     def _fill(self, servers):
         self._rows = [s for s in servers if s["game"] == self.game]
@@ -713,11 +795,16 @@ class ServerPage(Page):
         items = [("💬 RCONコンソール", self._rcon_console)]
         if self.game == "palworld":
             items.append(("⚙ 詳細設定", lambda: self._pal_settings(s)))
+            items.append(("🧠 メモリ変更(VM)", lambda: self._mc_memory(s)))
         if self.game == "minecraft":
             items.append(("⚙ 詳細設定 (server.properties)",
                           lambda: self._mc_settings(s)))
             items.append(("🧩 Mod管理", lambda: self._mc_mods(s)))
+            items.append(("🔀 バージョン変更(アップグレード)",
+                          lambda: self._mc_version(s)))
+            items.append(("🧠 メモリ変更", lambda: self._mc_memory(s)))
         items.append(("💾 バックアップ/復元", lambda: self._backup_dialog(s)))
+        items.append(("🚫 BAN管理(BAN/キック/許可リスト)", lambda: self._ban_manage(s)))
         if self.game in ("minecraft", "palworld"):
             items.append(("🔄 ワールドリセット(危険)", lambda: self._reset_world(s)))
         items += [None,
@@ -727,7 +814,23 @@ class ServerPage(Page):
             items += [None,
                       ("🔍 更新を確認", lambda: self._update_check(s)),
                       ("⬆ 更新する", lambda: self._update(s))]
+        items += [None, ("🗑 サーバー削除", lambda: self._delete_server(s))]
         return items
+
+    def _ban_manage(self, s):
+        from .dialogs import BanManageDialog
+        name = s["name"]
+        BanManageDialog(
+            self.winfo_toplevel(), s.get("display_name") or name, self.game,
+            lambda action, target, reason: self.client.server_moderate(
+                name, action, target, reason),
+            self.worker)
+
+    def _delete_server(self, s):
+        from .dialogs import DeleteServerDialog
+        DeleteServerDialog(self.winfo_toplevel(), s, self.client, self.worker,
+                           on_done=lambda: self.app.toast(
+                               "サーバー削除を開始しました(タスク画面で進捗を確認)"))
 
     def _reset_world(self, s):
         from .dialogs import WorldResetDialog
@@ -754,15 +857,41 @@ class ServerPage(Page):
                  f"{'公開停止' if stop else '外部公開'} {disp}")
 
     def _mc_settings(self, s):
-        from .dialogs import PropsEditor
+        from .dialogs import SettingsEditor, mc_settings_tabs
         name = s["name"]
-        PropsEditor(self.winfo_toplevel(), s["display_name"], self.worker,
-                    fetch_fn=lambda: self.client.mc_config_get(name),
-                    save_fn=lambda ch, rs: self.client.mc_config_set(name, ch, rs))
+        self.app.toast("設定を取得中…(VM停止中は起動→取得→停止するため数十秒かかります)")
+
+        def opened(props, err):
+            if err:
+                messagebox.showerror("設定", str(err), parent=self.winfo_toplevel())
+                return
+            values = {p["key"]: p["value"] for p in (props or [])}
+            tabs = mc_settings_tabs(list(values))
+            SettingsEditor(
+                self.winfo_toplevel(),
+                f"⚙ {s['display_name']} 設定 (server.properties)",
+                tabs, self.worker,
+                fetch_fn=lambda ids: {"values": values},
+                save_fn=lambda ch, rs: self.client.mc_config_set(name, ch, rs),
+                note="server.properties を日本語表示しています。変更した項目だけ保存します。",
+                restart_label="保存後に再起動して反映する")
+        self.worker.submit(lambda: self.client.mc_config_get(name), opened)
 
     def _mc_mods(self, s):
         from .mod_dialog import ModManager
         ModManager(self.winfo_toplevel(), s, self.client, self.worker)
+
+    def _mc_version(self, s):
+        from .dialogs import McVersionDialog
+        McVersionDialog(self.winfo_toplevel(), s, self.client, self.worker,
+                        on_started=lambda: self.app.toast(
+                            "バージョン変更を開始しました(タスク画面で進捗を確認)"))
+
+    def _mc_memory(self, s):
+        from .dialogs import MemoryDialog
+        MemoryDialog(self.winfo_toplevel(), s, self.client, self.worker,
+                     on_done=lambda: self.app.toast(
+                         "メモリ変更を開始しました(タスク画面で進捗を確認)"))
 
     def _backup_dialog(self, s):
         from .dialogs import BackupDialog
@@ -834,10 +963,17 @@ class VmPage(Page):
                                                                           padx=(0, 6))
         self.btn(b, "⏹ 強制停止", lambda: self._stop(True), "danger").pack(side="left")
         self.btn(b, "📋 クローン", self._clone, "normal").pack(side="left", padx=(6, 0))
-        ctk.CTkLabel(self, text="VMを止める前に、上のゲームサーバーを保存して停止します",
+        self.btn(b, "🗑 削除", self._delete, "danger").pack(side="left", padx=(6, 0))
+        self.btn(b, "🖥 PC再起動", self._host_restart, "danger").pack(side="right")
+        ctk.CTkLabel(self, text="VMを止める前に、上のゲームサーバーを保存して停止します"
+                     "  /  「PC再起動」はホストを再起動(ARK/VMは再起動後に自動復帰)",
                      text_color=MUTED, font=ctk.CTkFont(size=11)).pack(anchor="w",
                                                                        pady=(8, 0))
         self.poll(self.client.vms, self._fill, ms=8000)
+
+    def _host_restart(self):
+        from .dialogs import HostRestartDialog
+        HostRestartDialog(self.winfo_toplevel(), self.client, self.worker)
 
     def _fill(self, vms):
         self._vms = vms
@@ -852,6 +988,26 @@ class VmPage(Page):
         from .dialogs import VmCloneDialog
         VmCloneDialog(self.winfo_toplevel(), self.worker,
                       clone_fn=self.client.vm_clone, vms_fn=self.client.vms)
+
+    def _delete(self):
+        v = self._sel()
+        if not v:
+            return
+        on = v.get("servers") or []
+        if on:
+            messagebox.showinfo(
+                "VM削除",
+                f"VM {v['name']} には登録サーバー({', '.join(on)})があります。\n"
+                "先に Minecraft/Palworld ページの『🗑 サーバー削除』で削除してください。",
+                parent=self)
+            return
+        dlg = ctk.CTkInputDialog(
+            text=(f"VM「{v['name']}」と仮想ディスクを完全に削除します(戻せません)。\n"
+                  f"削除するにはVM名『{v['name']}』を入力してください:"),
+            title="VM削除の確認")
+        if (dlg.get_input() or "").strip() != v["name"]:
+            return
+        self.act(lambda: self.client.vm_delete(v["name"], True), f"VM削除 {v['name']}")
 
     def _sel(self):
         return picked(self, self.t, self._vms, "name", "VM")
@@ -919,17 +1075,697 @@ class TaskPage(Page):
         self.worker.submit(lambda: self.client.task(s[0]), done)
 
 
+class AddMemberDialog(ctk.CTkToplevel):
+    """クラスタにMCサーバーを追加する(共有ON/OFFを選ぶ)。"""
+
+    def __init__(self, master, cluster, available, client, worker, on_done=None):
+        super().__init__(master)
+        self.cluster = cluster
+        self.available = available          # [{server, display}]
+        self.client = client
+        self.worker = worker
+        self.on_done = on_done
+        self.title(f"サーバー追加 — {cluster}")
+        self.geometry("460x260")
+        self.configure(fg_color="#0f1115")
+
+        ctk.CTkLabel(self, text=f"🌐 クラスタ「{cluster}」にサーバーを追加",
+                     text_color=TEXT, font=ctk.CTkFont(size=14, weight="bold")).pack(
+            anchor="w", padx=16, pady=(14, 2))
+        ctk.CTkLabel(self, text="追加するとClusterConnect+CombatSwitchを配置し、online-mode=falseにして"
+                     "Velocityへ登録します(対象サーバーが再起動します)。",
+                     text_color=MUTED, wraplength=420, justify="left",
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16, pady=(0, 8))
+
+        self._map = {a["display"]: a["server"] for a in available}
+        self.menu = ctk.CTkOptionMenu(self, values=list(self._map) or ["(なし)"],
+                                      width=280, font=ctk.CTkFont(size=12))
+        self.menu.pack(anchor="w", padx=16, pady=4)
+        self.share = ctk.CTkSwitch(self, text="アイテム共有ON(InvSync+共有DB)",
+                                   onvalue=True, offvalue=False,
+                                   font=ctk.CTkFont(size=12))
+        self.share.select()
+        self.share.pack(anchor="w", padx=16, pady=8)
+        ctk.CTkLabel(self, text="※OFFにするとそのワールドは独立インベントリ(移動は可能)。",
+                     text_color=MUTED, font=ctk.CTkFont(size=10)).pack(anchor="w", padx=16)
+        self.status = ctk.CTkLabel(self, text="", text_color=MUTED, wraplength=420,
+                                   justify="left", font=ctk.CTkFont(size=11))
+        self.status.pack(anchor="w", padx=16, pady=(4, 0))
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=14, pady=(12, 12), side="bottom")
+        ctk.CTkButton(bar, text="追加", width=90, height=34, corner_radius=6,
+                      fg_color=ACCENT, hover_color="#4a86e0",
+                      command=self._add).pack(side="right")
+        ctk.CTkButton(bar, text="キャンセル", width=90, height=34, corner_radius=6,
+                      fg_color="#2b303a", hover_color="#39404d",
+                      command=self.destroy).pack(side="right", padx=(0, 8))
+        self.after(120, self.lift)
+
+    def _add(self):
+        disp = self.menu.get()
+        server = self._map.get(disp)
+        if not server:
+            return
+        share = bool(self.share.get())
+        from .jobwait import watch_job, _last_log
+
+        def upd(state, task):
+            if not self.winfo_exists():
+                return
+            if state in ("submitted", "running"):
+                line = _last_log(task)
+                self.status.configure(text=f"⏳ {line or '追加中…'}", text_color=MUTED)
+            elif state == "success":
+                self.status.configure(
+                    text=f"✅ {server} を追加しました(mod配布・Velocity更新済み)。",
+                    text_color="#7ee787")
+                messagebox.showinfo("サーバー追加",
+                                    f"{server} をクラスタに追加しました。", parent=self)
+                if callable(self.on_done):
+                    self.on_done()
+                self.destroy()
+            else:
+                err = (task or {}).get("error") or "不明なエラー"
+                self.status.configure(text=f"❌ 失敗: {err}", text_color="#ff8f8f")
+                messagebox.showerror("サーバー追加 失敗", str(err), parent=self)
+        watch_job(self, self.worker,
+                  lambda: self.client.cluster_add_member(self.cluster, server, share),
+                  self.client.task, upd)
+
+
+class ClusterPage(Page):
+    """MCクラスタ管理。1つのVelocity配下でクラスタを複数持てる。共有はメンバー単位。"""
+
+    def build(self):
+        self.title("🌐 クラスタ (Minecraft)")
+        top = self.bar()
+        self.btn(top, "＋ 新規クラスタ", self._new_cluster, "primary").pack(side="left")
+        self.btn(top, "🔄 更新", self._refresh, "normal").pack(side="left", padx=6)
+        ctk.CTkLabel(top, text="  Velocityプロキシ配下でMC鯖を束ね /s で移動。アイテム共有はメンバーごとON/OFF。",
+                     text_color=MUTED, font=ctk.CTkFont(size=11)).pack(side="left", padx=8)
+        self.wrap = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.wrap.pack(fill="both", expand=True, pady=(10, 0))
+        self._avail = []
+        self.poll(self.client.clusters, self._render, ms=8000)
+
+    def _render(self, data):
+        if not self.winfo_exists():
+            return
+        for w in self.wrap.winfo_children():
+            w.destroy()
+        self._avail = data.get("available", [])
+        if not data.get("velocity_ok"):
+            ctk.CTkLabel(self.wrap, text="⚠ Velocityプロキシ(C:\\Velocity)が見つかりません。"
+                         "先にプロキシ構築が必要です。", text_color="#ffd166",
+                         font=ctk.CTkFont(size=12)).pack(anchor="w", pady=6)
+        clusters = data.get("clusters", [])
+        if not clusters:
+            ctk.CTkLabel(self.wrap, text="クラスタがありません。「＋ 新規クラスタ」で作成してください。",
+                         text_color=MUTED, font=ctk.CTkFont(size=12)).pack(anchor="w", pady=8)
+        for c in clusters:
+            self._card(c)
+
+    def _card(self, c):
+        card = ctk.CTkFrame(self.wrap, fg_color=CARD, corner_radius=10)
+        card.pack(fill="x", pady=6)
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(10, 4))
+        ctk.CTkLabel(head, text=f"🌐 {c['name']}", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(side="left")
+        self.btn(head, "🗑 削除", lambda n=c["name"]: self._del(n), "danger").pack(side="right")
+        self.btn(head, "＋ サーバー追加", lambda n=c["name"]: self._add(n),
+                 "normal").pack(side="right", padx=6)
+        members = c.get("members", [])
+        if not members:
+            ctk.CTkLabel(card, text="  メンバーなし", text_color=MUTED,
+                         font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16, pady=(0, 10))
+        for m in members:
+            self._row(card, c["name"], m)
+
+    def _row(self, card, cname, m):
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=2)
+        ctk.CTkLabel(row, text=f"•  {m['display']}   ({m['address']})",
+                     text_color="#d7dee6", font=ctk.CTkFont(size=12)).pack(side="left")
+        self.btn(row, "除外", lambda: self._remove(cname, m["server"]),
+                 "normal").pack(side="right")
+        sw = ctk.CTkSwitch(row, text="アイテム共有", onvalue=True, offvalue=False,
+                           font=ctk.CTkFont(size=11))
+        sw.configure(command=lambda: self._toggle(cname, m["server"], bool(sw.get())))
+        (sw.select if m["share"] else sw.deselect)()
+        sw.pack(side="right", padx=12)
+
+    # ---- 操作 ----
+    def _new_cluster(self):
+        dlg = ctk.CTkInputDialog(text="クラスタ名(英数字・ハイフン・アンダースコア):",
+                                 title="新規クラスタ")
+        name = (dlg.get_input() or "").strip()
+        if not name:
+            return
+
+        def done(res, err):
+            if err:
+                messagebox.showerror("新規クラスタ", str(err), parent=self)
+                return
+            self._refresh()
+        self.worker.submit(lambda: self.client.cluster_create(name), done)
+
+    def _add(self, cname):
+        if not self._avail:
+            messagebox.showinfo("サーバー追加",
+                                "追加できるMCサーバーがありません(全て他クラスタに所属済み)。",
+                                parent=self)
+            return
+        AddMemberDialog(self.winfo_toplevel(), cname, self._avail,
+                        self.client, self.worker, on_done=self._refresh)
+
+    def _del(self, name):
+        if not ask(self, f"クラスタ「{name}」を削除しますか?\n"
+                   "メンバーはプロキシ設定・共有modが外れ online-mode=true に戻ります。"):
+            return
+        self.act(lambda: self.client.cluster_delete(name), f"クラスタ削除 {name}")
+
+    def _remove(self, cname, server):
+        if not ask(self, f"{server} をクラスタ「{cname}」から除外しますか?\n"
+                   "(プロキシ設定・共有modを外し online-mode=true に戻します)"):
+            return
+        self.act(lambda: self.client.cluster_remove_member(cname, server),
+                 f"除外 {server}")
+
+    def _toggle(self, cname, server, want):
+        self.act(lambda: self.client.cluster_set_share(cname, server, want),
+                 f"共有{'ON' if want else 'OFF'} {server}")
+
+    def _refresh(self):
+        self.worker.submit(self.client.clusters,
+                           lambda d, e: (e is None) and self._render(d))
+
+
+_BK_SECTIONS = [("ark", "🦖 ARK"), ("minecraft", "🟩 Minecraft"),
+                ("palworld", "🐑 Palworld"), ("other", "🗂 その他(削除済みなど)")]
+
+
+class BackupPage(Page):
+    """バックアップ統合管理。ゲーム別に一覧し、復元/削除/今すぐ取得ができる。
+
+    保持設定(世代数・保持日数・保存先)もここでまとめて変更する。
+    """
+
+    def build(self):
+        self.title("💾 バックアップ管理")
+        top = self.bar()
+        self.btn(top, "🔄 更新", self._refresh, "normal").pack(side="left")
+        ctk.CTkLabel(top, text="  ゲーム別に世代を一覧。復元・削除・今すぐ取得ができます。",
+                     text_color=MUTED, font=ctk.CTkFont(size=11)).pack(side="left", padx=8)
+
+        # 保持設定(世代数・保持日数・保存先)
+        cfgcard = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10)
+        cfgcard.pack(fill="x", pady=(10, 0))
+        row = ctk.CTkFrame(cfgcard, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=10)
+        ctk.CTkLabel(row, text="⚙ 保持設定", text_color=TEXT,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left", padx=(0, 12))
+        ctk.CTkLabel(row, text="世代数", text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(side="left")
+        self.keep_e = ctk.CTkEntry(row, width=60)
+        self.keep_e.pack(side="left", padx=(4, 12))
+        ctk.CTkLabel(row, text="保持日数", text_color=MUTED,
+                     font=ctk.CTkFont(size=11)).pack(side="left")
+        self.days_e = ctk.CTkEntry(row, width=60)
+        self.days_e.pack(side="left", padx=(4, 12))
+        self.btn(row, "💾 保存", self._save_settings, "primary").pack(side="right")
+        ctk.CTkLabel(cfgcard, text="  ※ 0=その条件では消しません。例) 世代数0＋保持日数30 = 件数無制限で30日保持。"
+                     "どちらも設定すると厳しい方が効きます(最新1件は常に残します)。",
+                     text_color=MUTED, wraplength=900, justify="left",
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=(0, 8))
+        self.path_lbl = ctk.CTkLabel(cfgcard, text="", text_color=MUTED,
+                                     font=ctk.CTkFont(size=11))
+        self.path_lbl.pack(anchor="w", padx=12, pady=(0, 8))
+
+        self.wrap = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.wrap.pack(fill="both", expand=True, pady=(10, 0))
+        self._load_settings()
+        self.poll(self.client.backups_all, self._render, ms=12000)
+
+    # ---- 保持設定 ----
+    def _load_settings(self):
+        def done(res, err):
+            if err or not self.winfo_exists():
+                return
+            self.keep_e.delete(0, "end"); self.keep_e.insert(0, str(res.get("keep", 10)))
+            self.days_e.delete(0, "end"); self.days_e.insert(0, str(res.get("retention_days", 0)))
+            self.path_lbl.configure(text=f"保存先: {res.get('path','')}")
+        self.worker.submit(self.client.backup_settings, done)
+
+    def _save_settings(self):
+        try:
+            keep = max(0, int(self.keep_e.get().strip() or "0"))
+            days = max(0, int(self.days_e.get().strip() or "0"))
+        except ValueError:
+            messagebox.showerror("保持設定", "世代数・保持日数は0以上の整数で入力してください。",
+                                 parent=self)
+            return
+
+        def done(res, err):
+            if err:
+                messagebox.showerror("保持設定", str(err), parent=self)
+            else:
+                self.app.toast("✅ 保持設定を保存しました")
+        self.worker.submit(
+            lambda: self.client.backup_settings_set(keep=keep, retention_days=days), done)
+
+    # ---- 一覧描画 ----
+    def _render(self, targets):
+        if not self.winfo_exists():
+            return
+        # 内容が前回と同じなら再描画しない(12秒毎の全再構築によるチラつき防止)
+        sig = tuple((t.get("target"), t.get("count"),
+                     tuple(b.get("name") for b in t.get("backups", [])))
+                    for t in targets)
+        if sig == getattr(self, "_last_sig", None):
+            return
+        self._last_sig = sig
+        for w in self.wrap.winfo_children():
+            w.destroy()
+        by_game: dict[str, list] = {}
+        for t in targets:
+            by_game.setdefault(t.get("game", "other"), []).append(t)
+        if not targets:
+            ctk.CTkLabel(self.wrap, text="バックアップはまだありません。",
+                         text_color=MUTED, font=ctk.CTkFont(size=12)).pack(anchor="w", pady=8)
+            return
+        for game, label in _BK_SECTIONS:
+            items = by_game.get(game)
+            if not items:
+                continue
+            ctk.CTkLabel(self.wrap, text=label, text_color=TEXT,
+                         font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w",
+                                                                        pady=(10, 2))
+            for t in items:
+                self._target_card(t)
+
+    def _target_card(self, t):
+        card = ctk.CTkFrame(self.wrap, fg_color=CARD, corner_radius=10)
+        card.pack(fill="x", pady=5)
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(8, 2))
+        ctk.CTkLabel(head, text=f"{t['display']}", text_color=TEXT,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        ctk.CTkLabel(head, text=f"   {t['count']}件 / {t['total_mb']} MB",
+                     text_color=MUTED, font=ctk.CTkFont(size=11)).pack(side="left")
+        # 今すぐ取得(MC/Palworld=サーバー名 / ARKワールド=idx。孤児・プレイヤーデータは不可)
+        can_backup = ((t["game"] in ("minecraft", "palworld"))
+                      or (t["game"] == "ark" and t["kind"] == "world"
+                          and t.get("idx") is not None))
+        if can_backup:
+            self.btn(head, "＋ 今すぐ取得", lambda tt=t: self._backup_now(tt),
+                     "normal").pack(side="right")
+        for b in t["backups"]:
+            self._backup_row(card, t, b)
+
+    def _backup_row(self, card, t, b):
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=1)
+        ctk.CTkLabel(row, text=f"📅 {b['mtime']}    {b['size_mb']} MB",
+                     text_color="#d7dee6", font=ctk.CTkFont(size=12)).pack(side="left")
+        self.btn(row, "🗑", lambda: self._delete(t, b), "danger").pack(side="right")
+        self.btn(row, "↩ 復元", lambda: self._restore(t, b),
+                 "normal").pack(side="right", padx=6)
+
+    # ---- 操作 ----
+    def _backup_now(self, t):
+        game = t["game"]
+        if game in ("minecraft", "palworld"):
+            fn = lambda: self.client.server_backup(t["target"])
+        else:
+            fn = lambda: self.client.ark_backup(t["idx"])
+        self.act(fn, f"バックアップ {t['display']}")
+        self.after(2500, self._refresh)
+
+    def _restore(self, t, b):
+        warn = ("復元は既存データを上書きします。対象サーバー/マップは"
+                "先に停止してください。\n\n"
+                f"対象: {t['display']}\nファイル: {b['name']}\n\n復元しますか?")
+        if not ask(self, warn):
+            return
+        self.act(lambda: self.client.backup_restore_any(t["target"], b["path"]),
+                 f"復元 {t['display']}")
+
+    def _delete(self, t, b):
+        if not ask(self, f"このバックアップを削除しますか?(元に戻せません)\n\n{b['name']}"):
+            return
+
+        def done(res, err):
+            if err:
+                messagebox.showerror("削除", str(err), parent=self)
+            else:
+                self.app.toast("🗑 バックアップを削除しました")
+                self._refresh()
+        self.worker.submit(lambda: self.client.backup_delete(b["path"]), done)
+
+    def _refresh(self):
+        self.worker.submit(self.client.backups_all,
+                           lambda d, e: (e is None) and self._render(d))
+
+
+class SettingsPage(Page):
+    """アプリ設定のエクスポート/インポート(独自の設定ファイル作成)。"""
+
+    def build(self):
+        self.title("⚙ 設定")
+        card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10)
+        card.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(card, text="設定のインポート / エクスポート", text_color=TEXT,
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w",
+                                                                    padx=14, pady=(12, 2))
+        ctk.CTkLabel(card, text="config.yaml(サーバー・ネットワーク・DNS等)と各種状態"
+                     "(通知・予約・ポート開放など)を1ファイルにまとめて保存/復元できます。\n"
+                     "パスワードを付けると暗号化され、取り込み時に同じパスワードが必要になります。",
+                     text_color=MUTED, wraplength=820, justify="left",
+                     font=ctk.CTkFont(size=12)).pack(anchor="w", padx=14, pady=(0, 10))
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(anchor="w", padx=14, pady=(0, 14))
+        self.btn(row, "⬆ エクスポート(書き出し)", self._export, "primary").pack(side="left")
+        self.btn(row, "⬇ インポート(読み込み)", self._import,
+                 "normal").pack(side="left", padx=8)
+        ctk.CTkLabel(self, text="※ インポートすると現在の設定は自動でバックアップされます"
+                     "(settings-pre-import_*.gsmbackup)。取り込み後はサービス再起動で"
+                     "全設定が反映されます。",
+                     text_color=MUTED, wraplength=820, justify="left",
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", pady=(10, 0))
+
+    def _export(self):
+        from .dialogs import ConfigExportDialog
+        ConfigExportDialog(self.winfo_toplevel(), self.client, self.worker)
+
+    def _import(self):
+        from .dialogs import ConfigImportDialog
+        ConfigImportDialog(self.winfo_toplevel(), self.client, self.worker,
+                           on_done=lambda: self.app.toast("✅ 設定を取り込みました"))
+
+
+class NetworkPage(Page):
+    """DNS登録状況とポート開放(UPnP)状況を表(Treeview)で一覧する画面。"""
+
+    def build(self):
+        self.title("🌐 ネットワーク (DNS / ポート)")
+        top = self.bar()
+        self.btn(top, "🔄 更新", self._refresh, "normal").pack(side="left")
+        self.ps_switch = ctk.CTkSwitch(top, text="自動ポート開放", onvalue=True,
+                                       offvalue=False, font=ctk.CTkFont(size=12),
+                                       command=self._toggle_portsync)
+        self.ps_switch.pack(side="left", padx=16)
+        self.btn(top, "🔌 ポート同期(手動)", self._reconcile, "normal").pack(side="left")
+
+        # 状態サマリー(WAN/DNS/自動開放)を1行で。右端に置かず左寄せで見切れ防止。
+        self.summary = ctk.CTkLabel(self, text="読み込み中…", text_color=MUTED,
+                                    anchor="w", font=ctk.CTkFont(size=11))
+        self.summary.pack(fill="x", pady=(8, 2))
+
+        self._dns_by_name: dict = {}
+
+        # ── DNS登録状況 ──
+        ctk.CTkLabel(self, text="DNS登録状況", text_color=TEXT,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w",
+                                                                    pady=(8, 2))
+        self.dns_t = tree(
+            self, ["state", "fqdn", "result"],
+            {"state": ("状態", 110), "fqdn": ("FQDN", 240), "result": ("解決結果", 300)},
+            first="サーバー", first_w=200, height=5)
+        for c in ("fqdn", "result"):
+            self.dns_t.column(c, anchor="w")
+        self.attach_menu(self.dns_t, self._dns_menu)
+
+        # ── サーバー別ポート開放 ──
+        ctk.CTkLabel(self, text="サーバー別ポート開放", text_color=TEXT,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w",
+                                                                    pady=(10, 2))
+        self.psrv_t = tree(
+            self, ["state", "ext", "intern"],
+            {"state": ("開放", 110), "ext": ("外部ポート", 150), "intern": ("内部", 200)},
+            first="サーバー", first_w=200, height=4)
+        self.psrv_t.column("intern", anchor="w")
+
+        # ── ルーターの現在のUPnP転送 ──
+        ctk.CTkLabel(self, text="ルーターの現在のUPnP転送", text_color=TEXT,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w",
+                                                                    pady=(10, 2))
+        self.upnp_t = tree(
+            self, ["ext", "proto", "dest", "owner"],
+            {"ext": ("外部", 90), "proto": ("プロト", 80),
+             "dest": ("転送先", 200), "owner": ("所有者", 200)},
+            first="説明", first_w=220, height=8)
+        for c in ("dest", "owner"):
+            self.upnp_t.column(c, anchor="w")
+
+        self.poll(self.client.network, self._render, ms=15000)
+
+    # ---- 操作 ----
+    def _toggle_portsync(self):
+        want = bool(self.ps_switch.get())
+
+        def done(res, err):
+            if err:
+                messagebox.showerror("自動ポート開放", str(err), parent=self)
+            else:
+                self.app.toast(f"自動ポート開放を{'ON' if want else 'OFF'}にしました")
+        self.worker.submit(
+            lambda: self.client.net_settings_set(portsync_enabled=want), done)
+
+    def _reconcile(self):
+        self.act(self.client.ports_reconcile, "ポート同期")
+
+    def _dns_menu(self):
+        sel = self.dns_t.selection()
+        if not sel:
+            return []
+        row = self._dns_by_name.get(sel[0])
+        if not row or not row.get("fqdn"):
+            return []
+        items = [("🌐 DNS登録/再登録",
+                  lambda: self._dns_register(row["name"], row["display"]))]
+        return items
+
+    def _dns_register(self, name, display):
+        self.act(lambda: self.client.server_dns_register(name), f"DNS登録 {display}")
+        self.after(2500, self._refresh)
+
+    def _refresh(self):
+        self.worker.submit(self.client.network,
+                           lambda d, e: (e is None) and self._render(d))
+
+    # ---- 描画 ----
+    def _render(self, data):
+        if not self.winfo_exists():
+            return
+        ports = data.get("ports", {})
+        en = ports.get("enabled")
+        if en is None:
+            self.ps_switch.configure(state="disabled")
+        else:
+            (self.ps_switch.select if en else self.ps_switch.deselect)()
+        wan = ports.get("wan")
+        auto = {True: "ON(起動中だけ開放)", False: "OFF(手動のみ)",
+                None: "無効"}.get(en, str(en))
+        wtxt = wan if ports.get("gateway_ok") else "ルーター(UPnP)応答なし"
+        self.summary.configure(
+            text=f"内部DNS: {data.get('resolver') or '(未設定)'}   /   "
+                 f"WAN: {wtxt}   /   自動ポート開放: {auto}")
+
+        # DNS
+        self._dns_by_name = {r["name"]: r for r in data.get("dns", [])}
+        dns_rows = []
+        for r in data.get("dns", []):
+            badge, tag, result = self._dns_cells(r)
+            dns_rows.append((r["name"], r["display"],
+                             (badge, r.get("fqdn") or "—", result), [tag]))
+        fill(self.dns_t, dns_rows)
+
+        # サーバー別ポート
+        prows = []
+        for s in ports.get("servers", []):
+            ep = s.get("external_port")
+            if not ep:
+                continue
+            opened = s.get("forwarded")
+            prows.append((f"psrv:{s['name']}", s["display"],
+                          ("🟢 開放中" if opened else "🔒 閉",
+                           f"{ep}/{s['proto']}", f":{s.get('game_port')}"),
+                          ["active" if opened else "off"]))
+        fill(self.psrv_t, prows)
+
+        # UPnP転送一覧
+        urows = []
+        maps = ports.get("mappings", [])
+        for i, m in enumerate(maps):
+            urows.append((
+                f"map:{i}", m.get("description") or "(名前なし)",
+                (m.get("external_port"), m.get("protocol"),
+                 f"{m.get('internal_client')}:{m.get('internal_port')}",
+                 m.get("owner") or "—"),
+                ["active" if m.get("gsm") else "off"]))
+        if not ports.get("gateway_ok"):
+            urows = [("map:err", "⚠ ルーター(UPnP)に接続できませんでした",
+                      ("", "", "", ""), ["err"])]
+        fill(self.upnp_t, urows)
+
+    @staticmethod
+    def _dns_cells(r):
+        """(バッジ, 色タグ, 解決結果テキスト) を返す。"""
+        if not r.get("fqdn"):
+            return ("— 未設定", "off", "fqdn未設定")
+        if r.get("error"):
+            return ("🔴 照会失敗", "err", str(r["error"])[:60])
+        if not r.get("resolves"):
+            return ("🔴 未登録", "err", "DNSに登録なし(右クリックで登録)")
+        a = ", ".join(r.get("a", []))
+        srv = r.get("srv")
+        srvtxt = f"  / SRV→:{srv['port']}" if srv else ""
+        if r.get("lan_match"):
+            return ("🟢 登録OK", "active", f"{a}(LAN一致){srvtxt}")
+        return ("🌐 外部/WAN", "running", f"{a}(外部公開でWAN){srvtxt}")
+
+
+_PL_SECTIONS = [("ark", "🦖 ARK"), ("minecraft", "🟩 Minecraft"),
+                ("palworld", "🐑 Palworld")]
+
+
+class PlayersPage(Page):
+    """各サーバーに今誰が入っているか(接続中プレイヤー名)を一覧する。"""
+
+    def build(self):
+        self.title("👥 プレイヤー (接続中)")
+        top = self.bar()
+        self.btn(top, "🔄 更新", self._refresh, "normal").pack(side="left")
+        self.total_lbl = ctk.CTkLabel(top, text="", text_color=TEXT,
+                                      font=ctk.CTkFont(size=13, weight="bold"))
+        self.total_lbl.pack(side="left", padx=16)
+        self.wrap = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.wrap.pack(fill="both", expand=True, pady=(10, 0))
+        self.poll(self.client.players_all, self._render, ms=8000)
+
+    def _refresh(self):
+        self.worker.submit(self.client.players_all,
+                           lambda d, e: (e is None) and self._render(d))
+
+    def _render(self, data):
+        if not self.winfo_exists():
+            return
+        groups = data.get("groups", [])
+        total = data.get("total", 0)
+        # 内容が同じなら再描画しない(8秒毎の全再構築によるチラつき防止)
+        sig = tuple((g.get("id"), g.get("running"), g.get("ready"),
+                     tuple(g.get("players", []))) for g in groups)
+        if sig == getattr(self, "_last_sig", None):
+            return
+        self._last_sig = sig
+        for w in self.wrap.winfo_children():
+            w.destroy()
+        self.total_lbl.configure(text=f"合計 {total} 人 接続中")
+        running = [g for g in groups if g.get("running")]
+        if not running:
+            ctk.CTkLabel(self.wrap, text="起動中のサーバーがありません。",
+                         text_color=MUTED, font=ctk.CTkFont(size=12)).pack(anchor="w",
+                                                                           pady=8)
+            return
+        by_kind: dict[str, list] = {}
+        for g in running:
+            by_kind.setdefault(g.get("kind", "other"), []).append(g)
+        for kind, label in _PL_SECTIONS:
+            items = by_kind.get(kind)
+            if not items:
+                continue
+            ctk.CTkLabel(self.wrap, text=label, text_color=TEXT,
+                         font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w",
+                                                                        pady=(10, 2))
+            for g in items:
+                self._server_card(g)
+
+    def _server_card(self, g):
+        card = ctk.CTkFrame(self.wrap, fg_color=CARD, corner_radius=10)
+        card.pack(fill="x", pady=4)
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(8, 2))
+        ctk.CTkLabel(head, text=g["display"], text_color=TEXT,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        cnt = g.get("count")
+        ready = g.get("ready")
+        badge = (f"{cnt} 人" if isinstance(cnt, int) else "―")
+        ctk.CTkLabel(head, text=f"   👥 {badge}", text_color=ACCENT,
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(side="left")
+        if not ready:
+            self._note(card, "起動中…(まだ参加できません)")
+            return
+        if not g.get("known"):
+            self._note(card, "取得不可(RCON応答なし)")
+            return
+        entries = g.get("entries") or [{"name": n, "id": n}
+                                       for n in (g.get("players") or [])]
+        if not entries:
+            self._note(card, "誰もいません")
+            return
+        for e in entries:
+            lb = ctk.CTkLabel(card, text=f"    👤 {e['name']}", text_color="#d7dee6",
+                              anchor="w", font=ctk.CTkFont(size=13))
+            lb.pack(fill="x", padx=14, pady=1)
+            lb.bind("<Button-3>", lambda ev, gg=g, ee=e: self._player_menu(ev, gg, ee))
+        ctk.CTkLabel(card, text="    ↳ プレイヤーを右クリックで キック/BAN",
+                     text_color=MUTED, font=ctk.CTkFont(size=10)).pack(anchor="w",
+                                                                       padx=14, pady=(1, 6))
+
+    def _player_menu(self, ev, g, e):
+        menu = tk.Menu(self, tearoff=0, bg=CARD, fg="#e6edf3",
+                       activebackground="#2f5c9e", activeforeground="#ffffff",
+                       bd=0, font=(ui_font(self), 10))
+        menu.add_command(label=f"🚫 {e['name']} をキック",
+                         command=lambda: self._quick_moderate(g, e, "kick"))
+        menu.add_command(label=f"⛔ {e['name']} をBAN",
+                         command=lambda: self._quick_moderate(g, e, "ban"))
+        menu.tk_popup(ev.x_root, ev.y_root)
+
+    def _quick_moderate(self, g, e, action):
+        verb = "キック" if action == "kick" else "BAN"
+        if not ask(self, f"{e['name']} を {verb} しますか?\n"
+                   f"(サーバー: {g['display']} / ID: {e['id']})"):
+            return
+
+        def call():
+            if g["kind"] == "ark":
+                idx = int(str(g["id"]).split(":")[1])
+                return self.client.ark_moderate(idx, action, e["id"])
+            return self.client.server_moderate(g["id"], action, e["id"])
+
+        def done(res, err):
+            if err:
+                messagebox.showerror(verb, str(err), parent=self)
+            else:
+                self.app.toast(f"✅ {e['name']} を{verb}しました")
+                self._refresh()
+        self.worker.submit(call, done)
+
+    @staticmethod
+    def _note(card, text):
+        ctk.CTkLabel(card, text=f"    {text}", text_color=MUTED,
+                     font=ctk.CTkFont(size=12)).pack(anchor="w", padx=14, pady=(0, 8))
+
+
 class App(ctk.CTk):
     NAV = [("dash", "  ダッシュボード", None),
            (None, "ゲームサーバー", "head"),
+           ("players", "     👥  プレイヤー", None),
            ("ark", "     🦖  ARK", None),
            ("pal", "     🐑  Palworld", None),
            ("mc", "     🟩  Minecraft", None),
+           ("cluster", "     🌐  クラスタ", None),
            (None, "システム", "head"),
            ("vm", "     🖥  VM", None),
+           ("network", "     🌐  ネットワーク", None),
            ("sched", "     ⏰  予約", None),
+           ("backup", "     💾  バックアップ", None),
            ("task", "     📋  タスク", None),
-           ("notify", "     🔔  通知", None)]
+           ("notify", "     🔔  通知", None),
+           ("settings", "     ⚙  設定", None)]
 
     def __init__(self, base=DEFAULT_BASE):
         super().__init__()
@@ -1066,6 +1902,10 @@ class App(ctk.CTk):
         self.toast_lb = ctk.CTkLabel(h, text="", text_color=OK,
                                      font=ctk.CTkFont(size=11))
         self.toast_lb.pack(side="right")
+        # IPアドレス競合の警告(競合時だけ表示・赤)
+        self.conflict_lbl = ctk.CTkLabel(h, text="", text_color="#ff6b6b",
+                                         font=ctk.CTkFont(size=12, weight="bold"))
+        self.conflict_lbl.pack(side="left", padx=14)
 
     def _set_scale(self, label: str) -> None:
         self.ui_scale = label
@@ -1117,6 +1957,8 @@ class App(ctk.CTk):
             return ServerPage(self.host, self, "palworld", "🐑 Palworld")
         if key == "mc":
             return ServerPage(self.host, self, "minecraft", "🟩 Minecraft")
+        if key == "cluster":
+            return ClusterPage(self.host, self)
         if key == "vm":
             return VmPage(self.host, self)
         if key == "sched":
@@ -1125,6 +1967,14 @@ class App(ctk.CTk):
         if key == "notify":
             from .notify_page import NotifyPage
             return NotifyPage(self.host, self)
+        if key == "backup":
+            return BackupPage(self.host, self)
+        if key == "settings":
+            return SettingsPage(self.host, self)
+        if key == "network":
+            return NetworkPage(self.host, self)
+        if key == "players":
+            return PlayersPage(self.host, self)
         return TaskPage(self.host, self)
 
     def toast(self, text: str) -> None:
@@ -1165,6 +2015,15 @@ class App(ctk.CTk):
                     text=f"🟢 接続中   ARK {r['ark_maps']} / サーバー {r['servers']}"
                          + (f"   実行中 {len(busy)}" if busy else ""),
                     text_color=OK)
+                conflicts = r.get("ip_conflicts") or []
+                if conflicts:
+                    txt = "  ".join(
+                        f"⚠ IP競合 {c['ip']}: {' / '.join(c['servers'])}"
+                        for c in conflicts)
+                    self.conflict_lbl.configure(
+                        text=txt + " → どちらか停止してください")
+                else:
+                    self.conflict_lbl.configure(text="")
             else:
                 self.svc.configure(text="🔴 サービス未接続", text_color=ERR)
             self.after(4000, self._health)

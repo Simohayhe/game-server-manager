@@ -1,4 +1,5 @@
 paramiko>=3.0
+cryptography>=42.0       # 設定エクスポートのパスワード暗号化(core/configio.py)。paramikoの依存でもある
 PyYAML>=6.0
 PyMySQL>=1.1
 ruamel.yaml>=0.18

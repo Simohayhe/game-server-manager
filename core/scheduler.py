@@ -28,6 +28,7 @@ class RestartJob:
     do_backup: bool = False       # バックアップを実行
     do_update: bool = False       # 更新があれば適用(停止→SteamCMD更新→元が稼働中なら起動)
     do_restart: bool = True       # 再起動を実行(バックアップ→更新→再起動の順に実行)
+    do_respawn: bool = False      # 野生恐竜を湧き直し(DestroyWildDinos。ARKのみ・稼働中のみ)
     rolling: bool = False         # ARK全マップ: 1台ずつ順に(前が復帰してから次)
     order: list = field(default_factory=list)  # ローリング順(map_labelの並び)
     interval_min: int = 0         # >0 なら間隔モード(N分毎に定期バックアップ)。時刻/曜日は無視
@@ -37,8 +38,6 @@ class RestartJob:
         return self.interval_min > 0
 
     def action_text(self) -> str:
-        if self.is_interval():
-            return "バックアップ(稼働中)"
         parts = []
         if self.do_backup:
             parts.append("バックアップ")
@@ -46,7 +45,13 @@ class RestartJob:
             parts.append("更新")
         if self.do_restart:
             parts.append("再起動")
-        return " → ".join(parts) if parts else "(なし)"
+        if self.do_respawn:
+            parts.append("湧き直し")
+        if parts:
+            return " → ".join(parts)
+        if self.is_interval():
+            return "バックアップ(稼働中)"      # 旧・間隔バックアップ(フラグ無し)の後方互換
+        return "(なし)"
 
     def times_text(self) -> str:
         if self.is_interval():
@@ -90,6 +95,7 @@ def load_jobs(path: str | Path) -> list[RestartJob]:
                 respawn_dinos=bool(j.get("respawn_dinos", False)),
                 do_backup=do_backup, do_restart=do_restart,
                 do_update=bool(j.get("do_update", False)),
+                do_respawn=bool(j.get("do_respawn", False)),
                 rolling=bool(j.get("rolling", False)),
                 order=list(j.get("order", [])),
                 interval_min=int(j.get("interval_min", 0) or 0),
