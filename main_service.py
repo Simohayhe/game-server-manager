@@ -129,11 +129,33 @@ def _safe_send(notify, url: str, text: str) -> None:
         print("通知の送信に失敗:", exc)
 
 
+def _already_running(port: int) -> bool:
+    """既にサービスが動いていないか(APIポートが使われていないか)を調べる。
+
+    二重起動すると監視・予約・通知が二重に走り、Discord通知が2回飛ぶ/予約が二重に
+    発火する等の実害が出る(実際に発生した)。APIポートは最後に開くので取りこぼしも
+    あり得るが、現実的なケース(既存サービスが動いている)はこれで防げる。
+    """
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1.0)
+        try:
+            s.connect(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="GSM 常駐サービス")
     ap.add_argument("--port", type=int, default=API_PORT_DEFAULT,
                     help=f"APIポート(既定 {API_PORT_DEFAULT})")
+    ap.add_argument("--force", action="store_true",
+                    help="既に動いていても起動する(通常は使わない)")
     args = ap.parse_args()
+    if not args.force and _already_running(args.port):
+        print(f"既にサービスが起動しています(ポート {args.port})。二重起動を中止しました。")
+        return 0
     try:
         svc = build_service(args.port)
     except Exception as exc:

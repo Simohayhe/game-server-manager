@@ -349,7 +349,7 @@ function renderTasks(m){
     c.append(el("div",{style:"padding:9px 0;border-top:1px solid var(--line)"},
       el("div",{class:"row spread"},
         el("div",{class:"row"}, el("span",{class:"statuspill "+cls}, st==="running"?el("span",{class:"spin"}):label),
-          el("b",{}, t.name||t.id)),
+          el("b",{}, t.title||t.id)),
         el("span",{class:"sub"}, t.category||"")),
       last?el("div",{class:"sub",style:"margin-top:4px;font-family:ui-monospace,Consolas,monospace"},last):null));
   }
