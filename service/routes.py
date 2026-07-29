@@ -52,6 +52,9 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         _notify("update", f"⬆ {name} の更新を開始します (build {cur} → {latest})", "ark")
         running = ah.is_running()
         if running:
+            from service.scheduler import announce_update
+            # 更新は通常の再起動より長い。止める前に理由をゲーム内へ知らせる
+            announce_update(ah, f"build {latest}" if latest else "")
             jobs.progress(f"■ {name} 更新のため停止…")
             ah.stop_with_notice(progress=jobs.progress)
         try:
@@ -1463,13 +1466,16 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         if srv.profile.game != "palworld":
             raise ApiError(400, "更新はPalworldのみ対応です")
         from core import palupdate
+        from service.scheduler import announce_update
         mark("restart", f"mc:{params['name']}")          # 更新中の停止=意図的
+
+        def do_update():
+            # 更新は通常の再起動より長い。止める前に理由をゲーム内へ知らせる
+            announce_update(srv)
+            return palupdate.update(srv.profile, progress=jobs.progress)
         t = jobs.submit(
             f"⬆ 更新: {srv.profile.display_name}",
-            lambda: _with_vm_ssh(
-                srv.profile,
-                lambda: palupdate.update(srv.profile, progress=jobs.progress),
-                jobs.progress),
+            lambda: _with_vm_ssh(srv.profile, do_update, jobs.progress),
             lane=server_lane(params["name"]), category="更新")
         return {"task_id": t.id}
     r.add("POST", r"/api/servers/(?P<name>[^/]+)/update", server_update)

@@ -23,9 +23,39 @@ from .runner import PLAYERS_LANE, ark_lane, server_lane
 
 SCHEDULES_PATH = app_dir() / "schedules.json"
 SCHED_STATE_PATH = app_dir() / "sched_state.json"   # 間隔モードの最終発火時刻
+ROLLING_STATE_PATH = app_dir() / "rolling_state.json"  # ローリングの進捗(中断→再開用)
 TICK_SEC = 20
 # 前段(更新など)が長引いた時に再起動を諦める上限。予約時刻から離れすぎた再起動は事故。
 CHAIN_MAX_DELAY_SEC = 3600
+# 中断されたローリングを再開してよい猶予。これを過ぎたら「予約時刻から離れすぎ」として破棄。
+ROLLING_RESUME_MAX_AGE_SEC = 7200
+
+
+def announce_update(server, build_text: str = "") -> None:
+    """更新のために止めることを、先にゲーム内へ知らせる。
+
+    通常の再起動は数分で戻るが、更新はダウンロードを挟むので待ち時間が読めない。
+    「なぜ長いのか」を伝えないとプレイヤーは落ちたと勘違いするため、停止予告とは
+    別にこれを流す。ARK/Palworldとも日本語は文字化けするのでASCIIで送る。
+    告知はベストエフォート(失敗しても更新は続行する)。
+    """
+    try:
+        if hasattr(server, "num_players"):
+            n = server.num_players()
+        else:
+            n = server.player_count()
+        if not n:                     # 誰も居なければ流さない(0/None)
+            return
+    except Exception:                 # noqa: BLE001  人数不明でも告知はしておく
+        pass
+    msg = "Server update available"
+    if build_text:
+        msg += f" ({build_text})"
+    msg += ". Updating now - this takes longer than a normal restart. Please rejoin in a few minutes."
+    try:
+        server.announce(msg)
+    except Exception:                 # noqa: BLE001
+        pass
 
 
 class SchedulerService:
@@ -48,6 +78,11 @@ class SchedulerService:
         self._thread = threading.Thread(target=self._loop, name="gsm-scheduler",
                                         daemon=True)
         self._thread.start()
+        # サービス再起動で中断されたローリングを続きから再開する(最初からやり直さない)
+        try:
+            self.resume_rolling()
+        except Exception as exc:                   # noqa: BLE001
+            print("ローリング再開の判定で例外:", exc)
 
     def stop(self) -> None:
         self._stop.set()
@@ -218,6 +253,9 @@ class SchedulerService:
         was = ah.is_running()
         if was:
             self._mark(ah, "restart")      # 更新中の停止=意図的(復旧させない)
+            # 通常の再起動より長く待たせるので、更新が理由であることを先に伝える
+            # (日本語はASAのチャットで文字化けするためASCIIで送る)
+            announce_update(ah, f"build {latest}" if latest else "")
             self.jobs.progress("更新のため停止(予告あり)…")
             ah.stop_with_notice(progress=self.jobs.progress)
         try:
@@ -255,32 +293,100 @@ class SchedulerService:
     def _fire_ark_all(self, job) -> None:
         if job.rolling:
             order = job.order or [a.cfg.map_label for a in self.ctx.arkhosts]
-            seq = [a for lbl in order for a in self.ctx.arkhosts
-                   if a.cfg.map_label == lbl]
-            seq += [a for a in self.ctx.arkhosts if a not in seq]
-
-            def fn():
-                t0 = _dt.datetime.now()
-                for ah in seq:
-                    if job.do_backup:
-                        self._do_backup(ah)
-                    if job.do_update:
-                        self._do_update(ah)
-                    if job.do_restart:
-                        late = (_dt.datetime.now() - t0).total_seconds()
-                        if late > CHAIN_MAX_DELAY_SEC:
-                            self.jobs.progress("⏭ 遅延のため以降の再起動を中止")
-                            break
-                        self._do_restart(ah)
-                    if job.do_respawn:
-                        self._do_respawn(ah)
-                return "done"
-            self.jobs.submit(f"⏰ ローリング({job.action_text()}): ARK全マップ", fn,
-                             lane="ark-rolling", category="予約")
+            labels = [a.cfg.map_label for lbl in order for a in self.ctx.arkhosts
+                      if a.cfg.map_label == lbl]
+            labels += [a.cfg.map_label for a in self.ctx.arkhosts
+                       if a.cfg.map_label not in labels]
+            self._submit_rolling(job, labels, resumed=False)
             return
         # 非ローリング: マップごとに別レーン = 並列に走る(1台の長い更新が他を止めない)
         for ah in self.ctx.arkhosts:
             self._submit_ark(job, ah)
+
+    # ---- ローリングの実行と中断→再開 ----
+    def _submit_rolling(self, job, labels: list[str], resumed: bool) -> None:
+        """未処理マップ(labels)を順に処理する。1マップ終わるごとに進捗を保存するので、
+        サービスが落ちても次回起動時に続きから再開できる(以前は最初からやり直しだった)。"""
+        def fn():
+            t0 = _dt.datetime.now()
+            remaining = list(labels)
+            for lbl in labels:
+                ah = next((a for a in self.ctx.arkhosts
+                           if a.cfg.map_label == lbl), None)
+                if ah is None:                    # 構成から消えたマップは飛ばす
+                    remaining.remove(lbl)
+                    self._rolling_save(job, remaining)
+                    continue
+                if job.do_backup:
+                    self._do_backup(ah)
+                if job.do_update:
+                    self._do_update(ah)
+                if job.do_restart:
+                    late = (_dt.datetime.now() - t0).total_seconds()
+                    if late > CHAIN_MAX_DELAY_SEC:
+                        self.jobs.progress("⏭ 遅延のため以降の再起動を中止")
+                        self._rolling_clear()
+                        return "aborted-late"
+                    self._do_restart(ah)
+                if job.do_respawn:
+                    self._do_respawn(ah)
+                remaining.remove(lbl)             # このマップは完了 → 進捗を更新
+                self._rolling_save(job, remaining)
+            self._rolling_clear()
+            return "done"
+
+        self._rolling_save(job, labels)            # 開始時点の未処理一覧を記録
+        label = f"⏰ ローリング({job.action_text()}): ARK全マップ"
+        if resumed:
+            label = f"⏰ ローリング再開({job.action_text()}): 残り{len(labels)}マップ"
+        self.jobs.submit(label, fn, lane="ark-rolling", category="予約")
+
+    def _rolling_save(self, job, remaining: list[str]) -> None:
+        try:
+            ROLLING_STATE_PATH.write_text(json.dumps({
+                "job_id": job.id,
+                "saved_at": _dt.datetime.now().isoformat(timespec="seconds"),
+                "remaining": remaining,
+            }, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            print("ローリング進捗の保存に失敗:", exc)
+
+    def _rolling_clear(self) -> None:
+        try:
+            ROLLING_STATE_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def resume_rolling(self) -> dict:
+        """サービス起動時に呼ぶ。中断されたローリングがあれば続きから再開する。
+
+        猶予(ROLLING_RESUME_MAX_AGE_SEC)を超えていたら再開しない=予約時刻から離れすぎた
+        再起動は事故になるため、記録だけ捨てる。
+        """
+        try:
+            d = json.loads(ROLLING_STATE_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"resumed": False}
+        remaining = [str(x) for x in (d.get("remaining") or [])]
+        if not remaining:
+            self._rolling_clear()
+            return {"resumed": False}
+        try:
+            age = (_dt.datetime.now()
+                   - _dt.datetime.fromisoformat(d["saved_at"])).total_seconds()
+        except (KeyError, ValueError):
+            age = None
+        if age is None or age > ROLLING_RESUME_MAX_AGE_SEC:
+            print(f"中断されたローリングを破棄(古すぎる: {age}秒): {remaining}")
+            self._rolling_clear()
+            return {"resumed": False, "discarded": remaining}
+        job = next((j for j in self.schedules if j.id == d.get("job_id")), None)
+        if job is None:
+            self._rolling_clear()
+            return {"resumed": False}
+        print(f"中断されたローリングを再開します(残り {len(remaining)}): {remaining}")
+        self._submit_rolling(job, remaining, resumed=True)
+        return {"resumed": True, "remaining": remaining}
 
     # ---- プレイヤーデータのみ(軽量・saveworldしない) ----
     def _fire_players(self, job) -> None:
@@ -300,6 +406,33 @@ class SchedulerService:
         self.jobs.submit(f"🧬 プレイヤーデータBK({job.interval_min}分毎)", fn,
                          lane=PLAYERS_LANE, category="定期バックアップ", on_done=done)
 
+    def _do_update_server(self, srv) -> str:
+        """MC/Palworldの予約更新。Palworldのみ対応(SteamCMD)。
+
+        以前はここが無く、予約に「更新」を入れても黙って何もしていなかった。
+        """
+        if srv.profile.game != "palworld":
+            self.jobs.progress(f"{srv.profile.display_name}: 更新は未対応(スキップ)")
+            return "更新非対応"
+        from core import palupdate
+        prof = srv.profile
+        try:
+            res = palupdate.check(prof)       # VM/SSHが落ちていればここで例外→下で握る
+            cur, latest = res.get("installed"), res.get("latest")
+            if not res.get("update_available"):
+                self.jobs.progress(f"{prof.display_name}: 最新({cur})")
+                return "最新"
+            # 更新は待ち時間が読めないので、止める前に理由を知らせる
+            announce_update(srv, f"build {latest}" if latest else "")
+            if self.recovery:                 # 更新中の停止=意図的(クラッシュ扱いしない)
+                self.recovery.mark_restart(f"mc:{prof.name}")
+            self.jobs.progress(f"{prof.display_name}: 更新 {cur}→{latest}…")
+            palupdate.update(prof, progress=self.jobs.progress)
+            return f"更新 {cur}→{latest}"
+        except Exception as exc:              # noqa: BLE001 更新失敗で後続を止めない
+            self.jobs.progress(f"更新に失敗: {exc}")
+            return f"更新失敗({exc})"
+
     # ---- MC / Palworld ----
     def _fire_server(self, job) -> None:
         srv = self.ctx.servers.get(job.target)
@@ -314,6 +447,8 @@ class SchedulerService:
                      else backup.mc_backup)(srv.profile, self.ctx.backupcfg,
                                             progress=self.jobs.progress)
                 out.append(f"BK={Path(p).name}")
+            if job.do_update:
+                out.append(self._do_update_server(srv))
             if job.do_restart:
                 if srv.status() != "active":
                     self.jobs.progress("停止中のため再起動スキップ")
