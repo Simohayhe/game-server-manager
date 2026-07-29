@@ -9,6 +9,7 @@ GUIは起動した瞬間から最新を表示でき、閉じてもサービス�
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 
@@ -27,9 +28,13 @@ class ApiError(Exception):
 
 
 class Client:
-    def __init__(self, base: str = DEFAULT_BASE, timeout: float = 15.0):
+    def __init__(self, base: str = DEFAULT_BASE, timeout: float = 15.0,
+                 token: str | None = None):
         self.base = base.rstrip("/")
         self.timeout = timeout
+        # 別PCから繋ぐ場合のトークン(APIにtokenが設定されている時に必要)。
+        # 未指定なら環境変数 GSM_TOKEN を見る。localhost・token無しのAPIには不要。
+        self.token = token or os.environ.get("GSM_TOKEN") or ""
 
     # ---- 低レベル ----
     def _call(self, method: str, path: str, body: dict | None = None,
@@ -37,6 +42,8 @@ class Client:
         url = self.base + path
         data = None
         headers = {}
+        if self.token:
+            headers["X-GSM-Token"] = self.token
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"

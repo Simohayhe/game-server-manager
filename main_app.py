@@ -108,10 +108,29 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="GSM")
     ap.add_argument("--service", action="store_true",
                     help="常駐サービスとして動く(内部用)")
-    args = ap.parse_args()
+    ap.add_argument("--connect", nargs="?", const=API, metavar="URL",
+                    help="接続専用GUI: 既存/別PCのサービスに繋ぐだけ"
+                         "(省略時は http://127.0.0.1:8770)")
+    ap.add_argument("--cli", action="store_true",
+                    help="コンソール(CLI)モード。以降の引数はコマンド")
+    ap.add_argument("--url", default=API, help="接続先API(--cli用)")
+    ap.add_argument("--token", default="", help="API認証トークン(別PC接続時)")
+    args, rest = ap.parse_known_args()
+
+    if args.token:
+        os.environ["GSM_TOKEN"] = args.token   # Client がヘッダに載せる
 
     if args.service:
         return _run_service()
+
+    if args.cli:                               # コンソール版
+        from gui.cli import run_cli
+        return run_cli(args.url, rest)
+
+    if args.connect is not None:               # 接続専用GUI(サービスを起こさない)
+        from gui.app_ctk import run
+        run(args.connect)
+        return 0
 
     # ---- 通常起動: セットアップ → サービス → GUI ----
     from core import compat

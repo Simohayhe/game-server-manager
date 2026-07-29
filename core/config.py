@@ -71,6 +71,8 @@ class AppConfig:
     backup: BackupConfig | None = None     # バックアップ設定(未設定可)
     curseforge_api_key: str = ""           # CurseForge APIキー(mod検索/導入用。未設定可)
     deployment: str = "hyperv"             # "hyperv"(VM運用) or "direct"(このPCで直接実行)
+    api_host: str = "127.0.0.1"            # API待受(既定=localhost限定。0.0.0.0でLAN公開)
+    api_token: str = ""                    # API認証トークン(LAN公開時に推奨。空=認証なし)
 
 
 class ConfigError(Exception):
@@ -271,4 +273,6 @@ def load_config(path: str | Path) -> AppConfig:
                      network=network, publish=publish, mod_sync=mod_sync,
                      curseforge_api_key=curseforge_api_key,
                      ark_hosts=ark_hosts, ark_steamcmd=raw.get("ark_steamcmd", ""),
-                     pal_hosts=pal_hosts, backup=backup, deployment=deployment)
+                     pal_hosts=pal_hosts, backup=backup, deployment=deployment,
+                     api_host=str((raw.get("api") or {}).get("host", "127.0.0.1")),
+                     api_token=str((raw.get("api") or {}).get("token", "")))

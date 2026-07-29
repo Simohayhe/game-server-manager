@@ -50,6 +50,39 @@ bash setup.sh
 python main_app.py           # 常駐(ウィンドウ非表示)は pythonw main_app.py
 ```
 
+### コンソール(CLI)・接続専用GUI
+
+GUIは「常駐サービス(127.0.0.1:8770のAPI)」を叩くクライアント。同じAPIを使う軽量な
+入口が2つある:
+
+```
+# コンソール(CLI) — ターミナルから直接操作
+gsm-cli status                     # 全体の状態(サーバー/ARK/接続人数)
+gsm-cli servers                    # MC/Palworld 一覧
+gsm-cli ark                        # ARKマップ一覧
+gsm-cli players                    # 接続中プレイヤー
+gsm-cli start minecraft4           # 対象はサーバー名 / ark:<idx> / マップ名
+gsm-cli restart ark:6
+gsm-cli rcon minecraft4 list
+# (.cmdを使わず) python main_app.py --cli status でも同じ
+
+# 接続専用GUI — サービスは起動せず、既存/別PCのサービスに繋ぐだけ
+gsm-connect                        # ローカル(127.0.0.1:8770)
+```
+
+**接続専用GUIの単体exe**: `GSM-Connect.exe`(`build_connect.ps1` でビルド)。
+サービスの常駐はホスト(タスク)任せにして、操作画面だけ開きたい時や、別PCから使う時に。
+ダブルクリックでローカルへ接続。別PCからは
+`GSM-Connect.exe http://<ホストIP>:8770 --token <token>`(または環境変数 `GSM_URL`/`GSM_TOKEN`)。
+
+別PCから操作したい場合は、ホスト側 `config.yaml` の `api:` で LAN公開＋トークンを有効化し
+(既定は localhost 限定で安全)、クライアントで `--url`/`--token` を渡す:
+
+```
+gsm-cli --url http://<ホストIP>:8770 --token <token> status
+gsm-connect http://<ホストIP>:8770 --token <token>
+```
+
 ## セットアップ手順
 
 ### 1. Hyper-Vホスト(Windows)側 = このソフトを動かすマシン

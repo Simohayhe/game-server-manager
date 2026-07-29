@@ -37,6 +37,13 @@ jobs:
             --collect-submodules paramiko --collect-submodules core --collect-submodules service --collect-submodules gui `
             --add-data "provisioners;provisioners" main_app.py
 
+      - name: 接続専用GUI exe ビルド(GSM-Connect)
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name GSM-Connect `
+            --collect-all customtkinter `
+            --collect-submodules paramiko --collect-submodules core --collect-submodules service --collect-submodules gui `
+            --add-data "provisioners;provisioners" gsm_connect.py
+
       - name: インストーラ作成(Inno Setup)
         shell: pwsh
         run: |
@@ -52,6 +59,7 @@ jobs:
           name: GameServerManager
           path: |
             dist/GameServerManager.exe
+            dist/GSM-Connect.exe
             installer_out/GameServerManager-Setup.exe
 
       # ↓ SignPath 承認後に有効化: dist の exe を署名して signed/ に受け取る
@@ -73,4 +81,5 @@ jobs:
         with:
           files: |
             dist/GameServerManager.exe
+            dist/GSM-Connect.exe
             installer_out/GameServerManager-Setup.exe

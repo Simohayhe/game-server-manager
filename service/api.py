@@ -43,7 +43,7 @@ class Router:
         return None, None
 
 
-def _handler_factory(router: Router):
+def _handler_factory(router: Router, token: str = ""):
     class _H(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -65,6 +65,10 @@ def _handler_factory(router: Router):
                 raise ApiError(400, f"JSONとして読めません: {exc}") from exc
 
         def _dispatch(self, method: str) -> None:
+            # トークンが設定されている時は認証必須(LAN公開時の保護)。
+            if token and self.headers.get("X-GSM-Token", "") != token:
+                self._send(401, {"error": "認証トークンが必要/不一致です(X-GSM-Token)"})
+                return
             path = urlparse(self.path).path.rstrip("/") or "/"
             handler, params = router.match(method, path)
             if handler is None:
@@ -96,10 +100,11 @@ class ApiServer:
     """常駐サービスに登録して使う(start/stop を持つ)。"""
 
     def __init__(self, router: Router, port: int = API_PORT_DEFAULT,
-                 host: str = "127.0.0.1"):
+                 host: str = "127.0.0.1", token: str = ""):
         self.router = router
         self.host = host
         self.port = port
+        self.token = token
         self._srv: http.server.ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -115,7 +120,7 @@ class ApiServer:
         if self._srv is not None:
             return
         self._srv = http.server.ThreadingHTTPServer(
-            (self.host, self.port), _handler_factory(self.router))
+            (self.host, self.port), _handler_factory(self.router, self.token))
         self._srv.daemon_threads = True
         self._thread = threading.Thread(target=self._srv.serve_forever,
                                         name="gsm-api", daemon=True)

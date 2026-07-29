@@ -42,7 +42,9 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
     api = ApiServer(build_router(ctx, state, scheduler=sched, dynserve=dyn,
                                  portsync=ports, recovery=rec, history=hist,
                                  notifier=notifier),
-                    port=api_port)
+                    port=api_port,
+                    host=getattr(ctx.config, "api_host", "127.0.0.1"),
+                    token=getattr(ctx.config, "api_token", ""))
 
     # 起動順: 配信 → 監視 → 予約 → ポート同期 → 採取 → API(最後=全部揃ってから受付)
     for c in (dyn, mon, sched, ports, sampler, api):

@@ -13,6 +13,16 @@ hyperv:
   # user: WINDOWS_USER
   # password: CHANGE_ME        # または key: ~/.ssh/id_ed25519
 
+# ==== API公開設定(任意) ====
+# GUI/CLI/接続専用GUIは、このAPI(既定 127.0.0.1:8770)を叩いて操作する。
+# 既定は localhost 限定なので、同じPC以外からは繋がらない(安全)。
+# 別PCのGUI/CLIから操作したい時だけ、LAN公開＋トークン認証を有効にする:
+# api:
+#   host: 0.0.0.0            # LANに公開(既定 127.0.0.1 は同一PC限定)
+#   token: CHANGE_ME_RANDOM  # 接続に必須の合言葉。--token かGSM_TOKEN環境変数で渡す
+#   # 例(別PCから): gsm-cli --url http://<このPCのIP>:8770 --token CHANGE_ME_RANDOM status
+#   #               gsm-connect http://<このPCのIP>:8770 --token CHANGE_ME_RANDOM
+
 # ==== SQL共有連動のMOD自動デプロイ(任意) ====
 mod_sync:
   enabled: false
