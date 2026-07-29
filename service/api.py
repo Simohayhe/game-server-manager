@@ -43,9 +43,44 @@ class Router:
         return None, None
 
 
-def _handler_factory(router: Router, token: str = ""):
+_STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".json": "application/json; charset=utf-8",
+}
+
+
+def _handler_factory(router: Router, token: str = "", web_dir=None):
     class _H(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+
+        def _serve_static(self, path: str) -> bool:
+            """web_dir 内の静的ファイルを返す(Web UI用)。/ は index.html。
+            トークン不要(ページ自体を開けないと入力欄も出せないため)。API(/api/)は対象外。"""
+            if not web_dir:
+                return False
+            rel = "index.html" if path in ("/", "") else path.lstrip("/")
+            try:
+                base = web_dir.resolve()
+                target = (base / rel).resolve()
+                if target != base and base not in target.parents:  # ディレクトリ抜け防止
+                    return False
+                if not target.is_file():
+                    return False
+                data = target.read_bytes()
+            except Exception:
+                return False
+            ctype = _STATIC_TYPES.get(target.suffix.lower(), "application/octet-stream")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return True
 
         def _send(self, status: int, payload) -> None:
             body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
@@ -86,6 +121,10 @@ def _handler_factory(router: Router, token: str = ""):
                 self._send(500, {"error": str(exc)})
 
         def do_GET(self):
+            path = urlparse(self.path).path
+            if not path.startswith("/api"):     # /api 以外は Web UI(静的)として扱う
+                if self._serve_static(path):
+                    return
             self._dispatch("GET")
 
         def do_POST(self):
@@ -100,11 +139,12 @@ class ApiServer:
     """常駐サービスに登録して使う(start/stop を持つ)。"""
 
     def __init__(self, router: Router, port: int = API_PORT_DEFAULT,
-                 host: str = "127.0.0.1", token: str = ""):
+                 host: str = "127.0.0.1", token: str = "", web_dir=None):
         self.router = router
         self.host = host
         self.port = port
         self.token = token
+        self.web_dir = web_dir
         self._srv: http.server.ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -120,7 +160,8 @@ class ApiServer:
         if self._srv is not None:
             return
         self._srv = http.server.ThreadingHTTPServer(
-            (self.host, self.port), _handler_factory(self.router, self.token))
+            (self.host, self.port),
+            _handler_factory(self.router, self.token, self.web_dir))
         self._srv.daemon_threads = True
         self._thread = threading.Thread(target=self._srv.serve_forever,
                                         name="gsm-api", daemon=True)

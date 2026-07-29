@@ -44,7 +44,8 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
                                  notifier=notifier),
                     port=api_port,
                     host=getattr(ctx.config, "api_host", "127.0.0.1"),
-                    token=getattr(ctx.config, "api_token", ""))
+                    token=getattr(ctx.config, "api_token", ""),
+                    web_dir=_web_dir())
 
     # 起動順: 配信 → 監視 → 予約 → ポート同期 → 採取 → API(最後=全部揃ってから受付)
     for c in (dyn, mon, sched, ports, sampler, api):
@@ -64,6 +65,13 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
             print("復帰処理で例外:", exc)
     threading.Thread(target=_restore, name="gsm-host-restore", daemon=True).start()
     return svc
+
+
+def _web_dir():
+    """Web UI(web/index.html)の場所。無ければ None(=Web UI無効)。"""
+    from core.paths import bundle_dir
+    d = bundle_dir() / "web"
+    return d if (d / "index.html").exists() else None
 
 
 def _make_notifier():

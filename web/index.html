@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>GSM Web</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171c22; --panel2:#1e252d; --line:#2a333d;
+    --fg:#e6edf3; --mut:#8b98a5; --accent:#3b82f6; --ok:#22c55e; --warn:#f59e0b;
+    --bad:#ef4444; --chip:#232b34;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",
+    "Hiragino Kaku Gothic ProN","Meiryo",sans-serif;font-size:15px;line-height:1.5}
+  a{color:var(--accent)}
+  header{position:sticky;top:0;z-index:10;background:linear-gradient(180deg,#12171d,#12171dee);
+    border-bottom:1px solid var(--line);padding:10px 14px;backdrop-filter:blur(6px)}
+  .hrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .brand{font-weight:700;font-size:17px;letter-spacing:.02em}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;
+    background:var(--chip);font-size:12.5px;color:var(--mut);border:1px solid var(--line)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--mut)}
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.warn{background:var(--warn)}
+  .grow{flex:1}
+  .iconbtn{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+    border-radius:8px;padding:6px 10px;cursor:pointer;font-size:13px}
+  .iconbtn:hover{border-color:var(--accent)}
+  nav{display:flex;gap:4px;overflow-x:auto;padding:8px 10px 0;scrollbar-width:none}
+  nav::-webkit-scrollbar{display:none}
+  .tab{white-space:nowrap;padding:8px 14px;border-radius:10px 10px 0 0;cursor:pointer;
+    color:var(--mut);border:1px solid transparent;border-bottom:none;font-weight:600}
+  .tab.active{color:var(--fg);background:var(--panel);border-color:var(--line)}
+  main{padding:14px;max-width:1000px;margin:0 auto}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:14px;margin:0 0 12px}
+  .card h3{margin:0 0 4px;font-size:15px}
+  .sub{color:var(--mut);font-size:12.5px}
+  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .spread{justify-content:space-between}
+  .btns{display:flex;gap:8px;flex-wrap:wrap}
+  button.act{border:none;border-radius:9px;padding:8px 12px;font-weight:600;cursor:pointer;
+    font-size:13.5px;color:#fff;background:var(--panel2)}
+  .b-start{background:var(--ok)} .b-stop{background:var(--bad)} .b-restart{background:var(--warn);color:#241a00}
+  .b-ghost{background:var(--panel2);border:1px solid var(--line);color:var(--fg)}
+  button.act:disabled{opacity:.4;cursor:not-allowed}
+  .statuspill{font-size:12px;padding:2px 9px;border-radius:999px;font-weight:600}
+  .s-on{background:#0e2f1b;color:#4ade80} .s-off{background:#2a2f36;color:#9aa7b3}
+  .s-boot{background:#3a2c07;color:#fbbf24}
+  select,input{background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+    border-radius:9px;padding:8px 10px;font-size:14px;font-family:inherit}
+  input{min-width:0}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--mut);font-weight:600}
+  .muted{color:var(--mut)}
+  .tag{display:inline-block;background:var(--chip);border:1px solid var(--line);
+    border-radius:6px;padding:1px 7px;font-size:11.5px;color:var(--mut);margin-left:6px}
+  .empty{color:var(--mut);text-align:center;padding:24px}
+  #toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:50;
+    display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
+  .toast{background:#0b0e12;border:1px solid var(--line);border-radius:10px;padding:10px 14px;
+    max-width:90vw;box-shadow:0 8px 30px #000a;font-size:13.5px;animation:pop .2s}
+  .toast.err{border-color:var(--bad)} .toast.ok{border-color:var(--ok)}
+  @keyframes pop{from{transform:translateY(8px);opacity:0}}
+  .modal{position:fixed;inset:0;background:#000a;display:none;align-items:center;
+    justify-content:center;z-index:40;padding:16px}
+  .modal.show{display:flex}
+  .sheet{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:16px;max-width:520px;width:100%;max-height:85vh;overflow:auto}
+  .kbd{font-family:ui-monospace,Consolas,monospace;background:#0b0e12;border:1px solid var(--line);
+    padding:1px 6px;border-radius:6px;font-size:12px}
+  .fld{display:flex;flex-direction:column;gap:4px;margin:8px 0}
+  .fld label{font-size:12.5px;color:var(--mut)}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--line);
+    border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  pre.log{background:#0b0e12;border:1px solid var(--line);border-radius:8px;padding:8px;
+    font-family:ui-monospace,Consolas,monospace;font-size:12px;max-height:180px;overflow:auto;
+    white-space:pre-wrap;margin:8px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <div class="hrow">
+    <span class="brand">🎮 GSM Web</span>
+    <span id="svc" class="pill"><span class="dot"></span> 接続確認中…</span>
+    <span class="grow"></span>
+    <button class="iconbtn" id="refbtn" title="自動更新の切替">⟳ 自動</button>
+    <button class="iconbtn" id="tokbtn" title="接続トークン">🔑</button>
+  </div>
+  <nav id="nav"></nav>
+</header>
+<main id="main"></main>
+
+<div id="toast"></div>
+<div class="modal" id="modal"><div class="sheet" id="sheet"></div></div>
+
+<script>
+"use strict";
+const $ = (s,r=document)=>r.querySelector(s);
+const el = (t,props={},...kids)=>{const e=document.createElement(t);
+  for(const k in props){ if(k==="class")e.className=props[k]; else if(k==="html")e.innerHTML=props[k];
+    else if(k.startsWith("on"))e.addEventListener(k.slice(2),props[k]); else e.setAttribute(k,props[k]); }
+  for(const c of kids){ if(c==null)continue; e.append(c.nodeType?c:document.createTextNode(c)); }
+  return e;};
+const TOKEN_KEY="gsm_token";
+let TOKEN = localStorage.getItem(TOKEN_KEY)||"";
+let autoRefresh = true, timer=null, current="overview";
+let cache = {servers:[], ark:[], players:{groups:[],total:0}, tasks:[]};
+
+// ---- API ----
+async function api(path, {method="GET", body=null}={}){
+  const h={}; if(TOKEN)h["X-GSM-Token"]=TOKEN;
+  if(body){h["Content-Type"]="application/json";}
+  const r = await fetch(path,{method,headers:h,body:body?JSON.stringify(body):null});
+  let data=null; try{data=await r.json();}catch(e){}
+  if(!r.ok){ const msg=(data&&data.error)||("HTTP "+r.status);
+    if(r.status===401){ openToken(true); }
+    throw new Error(msg); }
+  return data;
+}
+function toast(msg, kind=""){ const t=el("div",{class:"toast "+kind}, msg);
+  $("#toast").append(t); setTimeout(()=>{t.style.opacity="0";t.style.transition="opacity .4s";
+  setTimeout(()=>t.remove(),400);}, kind==="err"?4200:2600); }
+
+// ---- タスク待ち ----
+async function runTask(promise, label){
+  let res; try{res=await promise;}catch(e){toast("失敗: "+e.message,"err");return;}
+  if(res && res.task_id){ toast((label||"実行中")+" …"); await pollTask(res.task_id, label); }
+  else if(res && res.response!==undefined){ /* rcon 等 */ }
+  else { toast((label||"完了")+" ✓","ok"); }
+  refresh();
+}
+async function pollTask(id, label){
+  for(let i=0;i<200;i++){
+    let t; try{t=await api("/api/tasks/"+id);}catch(e){return;}
+    if(t.status==="success"){ toast((label||"タスク")+" 完了 ✓","ok"); refresh(); return; }
+    if(t.status==="failed"){ toast((label||"タスク")+" 失敗: "+(t.error||""),"err"); return; }
+    await new Promise(r=>setTimeout(r,2500));
+  }
+}
+async function confirmAct(msg){ return new Promise(res=>{
+  openSheet(el("div",{},
+    el("h3",{},"確認"), el("p",{class:"sub",style:"margin:6px 0 14px"},msg),
+    el("div",{class:"btns",style:"justify-content:flex-end"},
+      el("button",{class:"act b-ghost",onclick:()=>{closeSheet();res(false);}},"やめる"),
+      el("button",{class:"act b-restart",onclick:()=>{closeSheet();res(true);}},"実行"))));
+});}
+
+// ---- 状態取得 ----
+async function refresh(){
+  try{
+    const [h,s,a,p] = await Promise.all([
+      api("/api/health"), api("/api/servers"), api("/api/ark"), api("/api/players")]);
+    cache.servers=s.servers||[]; cache.ark=a.ark||[]; cache.players=p; cache.latest=a.latest_build;
+    setSvc(true, h);
+  }catch(e){ setSvc(false, null, e.message); return; }
+  if(current==="tasks"){ try{cache.tasks=(await api("/api/tasks?limit=40")).tasks||[];}catch(e){} }
+  render();
+}
+function setSvc(ok, h, err){
+  const p=$("#svc"); p.innerHTML="";
+  const dot=el("span",{class:"dot "+(ok?"ok":"bad")});
+  let txt = ok ? `稼働中 · ${h.direct?"直接":"Hyper-V"} · ${cache.players.total}人接続` : ("未接続 "+(err||""));
+  p.append(dot, document.createTextNode(" "+txt));
+}
+
+// ---- レンダリング ----
+const TABS=[["overview","🏠 概要"],["players","👥 プレイヤー"],
+  ["backups","💾 バックアップ"],["mod","🛡 モデレーション"],["tasks","📋 タスク"]];
+function buildNav(){ const n=$("#nav"); n.innerHTML="";
+  for(const [id,label] of TABS){ n.append(el("div",
+    {class:"tab"+(current===id?" active":""),onclick:()=>{current=id;buildNav();render();
+      if(id==="tasks")refresh();}}, label)); } }
+
+function render(){
+  const m=$("#main"); m.innerHTML="";
+  if(current==="overview") renderOverview(m);
+  else if(current==="players") renderPlayers(m);
+  else if(current==="backups") renderBackups(m);
+  else if(current==="mod") renderMod(m);
+  else if(current==="tasks") renderTasks(m);
+}
+
+// エンティティ = サーバー + ARKマップ を統一的に扱う
+function entities(){
+  const out=[];
+  for(const s of cache.servers) out.push({kind:"server",id:s.name,label:s.display_name,
+    game:s.game, running:s.status==="active", ready:s.ready, count:s.player_count,
+    sub:s.name, ver:s.version, base:"/api/servers/"+encodeURIComponent(s.name)});
+  for(const a of cache.ark) out.push({kind:"ark",id:a.index,label:a.display_name,
+    game:"ark", running:!!a.running, ready:!!a.ready, count:a.player_count,
+    sub:a.map_label, ver:a.version, base:"/api/ark/"+a.index});
+  return out;
+}
+function statusPill(e){
+  if(!e.running) return el("span",{class:"statuspill s-off"},"停止");
+  if(e.kind==="ark"&&!e.ready) return el("span",{class:"statuspill s-boot"},"起動中");
+  return el("span",{class:"statuspill s-on"},"稼働");
+}
+
+function renderOverview(m){
+  const es=entities();
+  const mk=(title,list)=>{
+    const c=el("div",{class:"card"}, el("h3",{},title));
+    if(!list.length) c.append(el("div",{class:"sub"},"なし"));
+    for(const e of list){
+      const busy=e.running&&e.kind==="ark"&&!e.ready;
+      c.append(el("div",{class:"row spread",style:"padding:9px 0;border-top:1px solid var(--line)"},
+        el("div",{},
+          el("div",{class:"row"}, statusPill(e), el("b",{}, e.label),
+            e.sub&&e.sub!==e.label?el("span",{class:"tag"},e.sub):null),
+          el("div",{class:"sub",style:"margin-top:3px"},
+            (e.running&&e.count?`👤 ${e.count}人`:"　")+(e.ver?"  ·  "+e.ver:""))),
+        el("div",{class:"btns"},
+          el("button",{class:"act b-start",disabled:e.running?"":null,
+            onclick:()=>runTask(api(e.base+"/start",{method:"POST"}),e.label+" 起動")}, busy?"起動中":"起動"),
+          el("button",{class:"act b-stop",disabled:e.running?null:"",
+            onclick:async()=>{ if(await confirmAct(e.label+" を停止します。接続中プレイヤーには予告が入ります。"))
+              runTask(api(e.base+"/stop",{method:"POST"}),e.label+" 停止"); }},"停止"),
+          el("button",{class:"act b-restart",disabled:e.running?null:"",
+            onclick:async()=>{ if(await confirmAct(e.label+" を再起動します。"))
+              runTask(api(e.base+"/restart",{method:"POST"}),e.label+" 再起動"); }},"再起動"))));
+    }
+    return c;
+  };
+  m.append(mk("🖥 MC / Palworld", es.filter(e=>e.kind==="server")));
+  m.append(mk("🦖 ARK", es.filter(e=>e.kind==="ark")));
+}
+
+function renderPlayers(m){
+  const g=cache.players.groups||[];
+  const c=el("div",{class:"card"}, el("h3",{},`👥 接続中プレイヤー（合計 ${cache.players.total}人）`));
+  const running=g.filter(x=>x.running);
+  if(!running.length){ c.append(el("div",{class:"empty"},"稼働中のサーバーはありません")); m.append(c); return; }
+  for(const x of running){
+    const names=(x.players||[]);
+    c.append(el("div",{style:"padding:9px 0;border-top:1px solid var(--line)"},
+      el("div",{class:"row spread"}, el("b",{},x.display),
+        el("span",{class:"statuspill "+(names.length?"s-on":"s-off")},
+          x.known?(names.length+"人"):"取得待ち")),
+      names.length?el("div",{class:"sub",style:"margin-top:4px"},names.join("、")):
+        el("div",{class:"sub",style:"margin-top:4px"},"（誰もいません）")));
+  }
+  m.append(c);
+}
+
+// ---- バックアップ ----
+let bkTarget=null;
+function renderBackups(m){
+  const es=entities();
+  if(!bkTarget && es.length) bkTarget=es[0].kind+":"+es[0].id;
+  const sel=el("select",{onchange:e=>{bkTarget=e.target.value;loadBackups();}});
+  for(const e of es){ const v=e.kind+":"+e.id;
+    sel.append(el("option",{value:v, ...(v===bkTarget?{selected:"selected"}:{})}, e.label)); }
+  const cur=es.find(e=>e.kind+":"+e.id===bkTarget);
+  const c=el("div",{class:"card"},
+    el("div",{class:"row spread"}, el("h3",{},"💾 バックアップ"),
+      el("button",{class:"act b-ghost",onclick:()=>{ if(cur)
+        runTask(api(cur.base+"/backup",{method:"POST"}), cur.label+" バックアップ"); }},"＋ 今すぐ作成")),
+    el("div",{class:"row",style:"margin:8px 0"}, sel),
+    el("div",{id:"bklist"}, el("div",{class:"empty"},el("span",{class:"spin"}))));
+  m.append(c); loadBackups();
+}
+async function loadBackups(){
+  const es=entities(); const cur=es.find(e=>e.kind+":"+e.id===bkTarget);
+  const box=$("#bklist"); if(!cur||!box)return;
+  let list=[]; try{ list=(await api(cur.base+"/backups")).backups||[]; }
+  catch(e){ box.innerHTML=""; box.append(el("div",{class:"empty"},"取得失敗: "+e.message)); return; }
+  box.innerHTML="";
+  if(!list.length){ box.append(el("div",{class:"empty"},"バックアップはまだありません")); return; }
+  const tb=el("table",{}, el("tr",{}, el("th",{},"日時"),el("th",{},"サイズ"),el("th",{},"")));
+  for(const b of list){ tb.append(el("tr",{},
+    el("td",{}, b.mtime, el("div",{class:"sub"},b.name)),
+    el("td",{}, (b.size_mb||0)+" MB"),
+    el("td",{style:"text-align:right"},
+      el("button",{class:"act b-ghost",onclick:async()=>{
+        if(cur.kind==="ark"&&cur.running){ toast("復元前にこのマップを停止してください","err"); return; }
+        if(await confirmAct(`${cur.label} を『${b.mtime}』時点に復元します。現在のデータは上書きされます。`))
+          runTask(api(cur.base+"/restore",{method:"POST",body:{file:b.name}}), cur.label+" 復元"); }},"復元")))); }
+  box.append(tb);
+}
+
+// ---- モデレーション ----
+const MOD_ACTIONS={
+  minecraft:[["kick","キック"],["ban","BAN"],["unban","BAN解除"],["banip","IP-BAN"],
+    ["banlist","BAN一覧"],["wl_add","WL追加"],["wl_remove","WL削除"],["wl_on","WL有効"],["wl_off","WL無効"]],
+  palworld:[["kick","キック"],["ban","BAN"]],
+  ark:[["kick","キック"],["ban","BAN"],["unban","BAN解除"],["banlist","BAN一覧"],
+    ["wl_add","許可追加"],["wl_remove","許可削除"]],
+};
+const TARGET_HINT={minecraft:"プレイヤー名",palworld:"SteamID",ark:"EOS ID(32桁) または 名前"};
+let modTarget=null;
+function renderMod(m){
+  const es=entities().filter(e=>e.game!=="minecraft"||true);
+  if(!modTarget && es.length) modTarget=es[0].kind+":"+es[0].id;
+  const sel=el("select",{onchange:e=>{modTarget=e.target.value;render();}});
+  for(const e of es){ const v=e.kind+":"+e.id;
+    sel.append(el("option",{value:v, ...(v===modTarget?{selected:"selected"}:{})}, e.label)); }
+  const cur=es.find(e=>e.kind+":"+e.id===modTarget);
+  const c=el("div",{class:"card"}, el("h3",{},"🛡 モデレーション"),
+    el("div",{class:"sub"},"BAN / キック / ホワイトリスト。多くはサーバー起動が必要（ARKのBAN/解除は停止中も可）。"),
+    el("div",{class:"row",style:"margin:10px 0"}, sel));
+  if(cur){
+    const acts=MOD_ACTIONS[cur.game]||[];
+    const inp=el("input",{placeholder:TARGET_HINT[cur.game]||"対象",style:"flex:1"});
+    const rsn=el("input",{placeholder:"理由(任意・BAN/キック)",style:"flex:1"});
+    c.append(el("div",{class:"row",style:"margin-bottom:8px"}, inp));
+    if(cur.game==="minecraft") c.append(el("div",{class:"row",style:"margin-bottom:8px"}, rsn));
+    c.append(
+      el("div",{class:"btns"}, ...acts.map(([a,label])=>
+        el("button",{class:"act "+(a==="banlist"?"b-ghost":a.startsWith("wl")||a==="unban"?"b-ghost":"b-stop"),
+          onclick:()=>doMod(cur,a,inp.value.trim(),rsn.value.trim())}, label))),
+      el("div",{id:"modout"}));
+  }
+  m.append(c);
+}
+async function doMod(cur,action,target,reason){
+  const needTarget=!["banlist","wl_on","wl_off","wl_list"].includes(action);
+  if(needTarget && !target){ toast("対象を入力してください","err"); return; }
+  const body={action,target,reason};
+  let res; try{ res=await api(cur.base+"/moderate",{method:"POST",body}); }
+  catch(e){ toast("失敗: "+e.message,"err"); return; }
+  const out=$("#modout"); out.innerHTML="";
+  if(action==="banlist"){
+    const banned=res.banned||res.response||[];
+    const arr=Array.isArray(banned)?banned:String(banned).split(/\r?\n/).filter(Boolean);
+    out.append(el("div",{class:"sub",style:"margin-top:10px"},`BAN対象 ${arr.length}件`),
+      el("pre",{class:"log"}, arr.length?arr.join("\n"):"（なし）"));
+  }else{
+    toast((res.message||"実行しました")+" ✓","ok");
+    if(res.response) out.append(el("pre",{class:"log"}, res.response));
+  }
+}
+
+// ---- タスク ----
+function renderTasks(m){
+  const c=el("div",{class:"card"}, el("div",{class:"row spread"},
+    el("h3",{},"📋 最近のタスク"),
+    el("button",{class:"act b-ghost",onclick:refresh},"更新")));
+  const ts=cache.tasks||[];
+  if(!ts.length){ c.append(el("div",{class:"empty"},"タスクはありません")); m.append(c); return; }
+  for(const t of ts){
+    const st=t.status; const cls=st==="success"?"s-on":st==="failed"?"s-off":st==="running"?"s-boot":"s-off";
+    const label=({success:"完了",failed:"失敗",running:"実行中",pending:"待機"})[st]||st;
+    const last=(t.log&&t.log.length)?t.log[t.log.length-1]:(t.error||"");
+    c.append(el("div",{style:"padding:9px 0;border-top:1px solid var(--line)"},
+      el("div",{class:"row spread"},
+        el("div",{class:"row"}, el("span",{class:"statuspill "+cls}, st==="running"?el("span",{class:"spin"}):label),
+          el("b",{}, t.name||t.id)),
+        el("span",{class:"sub"}, t.category||"")),
+      last?el("div",{class:"sub",style:"margin-top:4px;font-family:ui-monospace,Consolas,monospace"},last):null));
+  }
+  m.append(c);
+}
+
+// ---- トークン/モーダル ----
+function openSheet(node){ const s=$("#sheet"); s.innerHTML=""; s.append(node); $("#modal").classList.add("show"); }
+function closeSheet(){ $("#modal").classList.remove("show"); }
+$("#modal").addEventListener("click",e=>{ if(e.target.id==="modal")closeSheet(); });
+function openToken(fromAuth){
+  const inp=el("input",{value:TOKEN,placeholder:"トークン(未設定なら空のまま)",style:"width:100%"});
+  openSheet(el("div",{},
+    el("h3",{},"🔑 接続トークン"),
+    el("p",{class:"sub",style:"margin:6px 0 10px"},
+      fromAuth?"このサーバーは認証が必要です。config.yaml の api.token を入力してください。":
+      "別PCの公開API(api.token 設定時)に繋ぐ場合のみ必要。ローカルは空でOK。"),
+    el("div",{class:"fld"}, inp),
+    el("div",{class:"btns",style:"justify-content:flex-end;margin-top:10px"},
+      el("button",{class:"act b-ghost",onclick:closeSheet},"閉じる"),
+      el("button",{class:"act b-start",onclick:()=>{ TOKEN=inp.value.trim();
+        localStorage.setItem(TOKEN_KEY,TOKEN); closeSheet(); toast("保存しました","ok"); refresh(); }},"保存"))));
+}
+$("#tokbtn").addEventListener("click",()=>openToken(false));
+$("#refbtn").addEventListener("click",()=>{ autoRefresh=!autoRefresh;
+  $("#refbtn").style.opacity=autoRefresh?"1":".5"; toast(autoRefresh?"自動更新 ON":"自動更新 OFF"); });
+
+// ---- 起動 ----
+function tick(){ if(autoRefresh) refresh(); }
+buildNav(); refresh(); timer=setInterval(tick, 8000);
+</script>
+</body>
+</html>

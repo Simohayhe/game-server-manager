@@ -35,7 +35,7 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed --name GameServerManager `
             --collect-all customtkinter `
             --collect-submodules paramiko --collect-submodules core --collect-submodules service --collect-submodules gui `
-            --add-data "provisioners;provisioners" main_app.py
+            --add-data "provisioners;provisioners" --add-data "web;web" main_app.py
 
       - name: 接続専用GUI exe ビルド(GSM-Connect)
         run: |
