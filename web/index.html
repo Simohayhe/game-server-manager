@@ -365,8 +365,8 @@ function openToken(fromAuth){
   openSheet(el("div",{},
     el("h3",{},"🔑 接続パスワード"),
     el("p",{class:"sub",style:"margin:6px 0 10px"},
-      fromAuth?"このサーバーは接続パスワードが必要です。config.yaml の api.password を入力してください。":
-      "別PCの公開API(api.password 設定時)に繋ぐ場合のみ必要。ローカルは空でOK。"),
+      fromAuth?"パスワードを入力してください。":
+      "接続にパスワードが必要な場合はここで入力(保存されます)。不要なら空でOK。"),
     el("div",{class:"fld"}, inp),
     el("div",{class:"btns",style:"justify-content:flex-end;margin-top:10px"},
       el("button",{class:"act b-ghost",onclick:closeSheet},"閉じる"),
