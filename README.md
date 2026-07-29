@@ -67,31 +67,39 @@ gsm-cli rcon minecraft4 list
 # (.cmdを使わず) python main_app.py --cli status でも同じ
 
 # 接続専用GUI — サービスは起動せず、既存/別PCのサービスに繋ぐだけ
-gsm-connect                        # ローカル(127.0.0.1:8770)
+gsm-connect                        # URL/パスワード入力の接続画面を表示
 ```
 
 **接続専用GUIの単体exe**: `GSM-Connect.exe`(`build_connect.ps1` でビルド)。
-サービスの常駐はホスト(タスク)任せにして、操作画面だけ開きたい時や、別PCから使う時に。
-ダブルクリックでローカルへ接続。別PCからは
-`GSM-Connect.exe http://<ホストIP>:8770 --token <token>`(または環境変数 `GSM_URL`/`GSM_TOKEN`)。
+ダブルクリックすると接続画面(接続先URL＋パスワード＋接続履歴)が出る。
+直接繋ぐなら `GSM-Connect.exe http://<ホストIP>:8770 --password <pw>`。
 
-別PCから操作したい場合は、ホスト側 `config.yaml` の `api:` で LAN公開＋トークンを有効化し
-(既定は localhost 限定で安全)、クライアントで `--url`/`--token` を渡す:
+### 認証モデル（SCVMM型）
+
+`config.yaml` の `api.password` を設定すると、**サービス本体＝管理サーバー**、
+**各GUI/CLI/Web＝認証して繋ぐコンソール**という関係になり、接続時にパスワードを要求する
+(同一PCからでも必須)。未設定なら認証なし(従来通り)。
 
 ```
-gsm-cli --url http://<ホストIP>:8770 --token <token> status
-gsm-connect http://<ホストIP>:8770 --token <token>
+api:
+  host: 127.0.0.1     # 同一PCのみ(非公開)。別PC/スマホから繋ぐ時だけ 0.0.0.0
+  password: CHANGE_ME # 全コンソール共通の接続パスワード
 ```
 
-### Web UI（ブラウザから操作）
+- 接続専用GUI/メインGUI: 接続画面でパスワードを入力(保存可)。
+- CLI: 同一PCなら `config.yaml` から自動補完、別PCは `--password`/`GSM_PASSWORD`。
+- Web: 画面右上 🔑 から入力(ブラウザに保存)。
+
+### Web UI（ブラウザ / スマホから操作）
 
 常駐サービスが `web/index.html` を配信するので、**ブラウザで `http://<ホストIP>:8770/` を開くだけ**で
 GUIに近い操作ができる(概要/起動停止再起動・プレイヤー・バックアップ復元・モデレーション・タスク)。
-インストール不要でスマホからも使える(同一オリジンなので追加設定なし)。
+インストール不要。
 
 - このPCから: `http://127.0.0.1:8770/`
-- 別PC/スマホから: `config.yaml` の `api.host: 0.0.0.0`(+推奨 `api.token`)を設定し、
-  `http://<ホストIP>:8770/` を開く。トークン設定時は画面右上の 🔑 から入力(ブラウザに保存)。
+- 別PC/スマホから: `config.yaml` を `api.host: 0.0.0.0`(+`api.password`)にしてサービス再起動、
+  Windowsファイアウォールで受信TCP 8770を許可 → スマホのブラウザで `http://<ホストIP>:8770/`。
+  パスワードは右上 🔑 から入力(保存される)。
 
 ## セットアップ手順
 

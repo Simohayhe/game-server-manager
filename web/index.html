@@ -88,7 +88,7 @@
     <span id="svc" class="pill"><span class="dot"></span> 接続確認中…</span>
     <span class="grow"></span>
     <button class="iconbtn" id="refbtn" title="自動更新の切替">⟳ 自動</button>
-    <button class="iconbtn" id="tokbtn" title="接続トークン">🔑</button>
+    <button class="iconbtn" id="tokbtn" title="接続パスワード">🔑</button>
   </div>
   <nav id="nav"></nav>
 </header>
@@ -361,12 +361,12 @@ function openSheet(node){ const s=$("#sheet"); s.innerHTML=""; s.append(node); $
 function closeSheet(){ $("#modal").classList.remove("show"); }
 $("#modal").addEventListener("click",e=>{ if(e.target.id==="modal")closeSheet(); });
 function openToken(fromAuth){
-  const inp=el("input",{value:TOKEN,placeholder:"トークン(未設定なら空のまま)",style:"width:100%"});
+  const inp=el("input",{value:TOKEN,type:"password",placeholder:"パスワード(未設定なら空のまま)",style:"width:100%"});
   openSheet(el("div",{},
-    el("h3",{},"🔑 接続トークン"),
+    el("h3",{},"🔑 接続パスワード"),
     el("p",{class:"sub",style:"margin:6px 0 10px"},
-      fromAuth?"このサーバーは認証が必要です。config.yaml の api.token を入力してください。":
-      "別PCの公開API(api.token 設定時)に繋ぐ場合のみ必要。ローカルは空でOK。"),
+      fromAuth?"このサーバーは接続パスワードが必要です。config.yaml の api.password を入力してください。":
+      "別PCの公開API(api.password 設定時)に繋ぐ場合のみ必要。ローカルは空でOK。"),
     el("div",{class:"fld"}, inp),
     el("div",{class:"btns",style:"justify-content:flex-end;margin-top:10px"},
       el("button",{class:"act b-ghost",onclick:closeSheet},"閉じる"),

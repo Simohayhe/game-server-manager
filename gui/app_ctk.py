@@ -17,7 +17,7 @@ from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 
-from .client import Client
+from .client import ApiError, Client, ServiceUnavailable
 from .dashboard import Dashboard
 from .widgets import ACCENT, CARD, ERR, MUTED, OK, TEXT, LogView
 
@@ -1767,7 +1767,7 @@ class App(ctk.CTk):
            ("notify", "     🔔  通知", None),
            ("settings", "     ⚙  設定", None)]
 
-    def __init__(self, base=DEFAULT_BASE):
+    def __init__(self, base=DEFAULT_BASE, token: str = ""):
         super().__init__()
         ctk.set_appearance_mode("dark")
         self.title("Game Server Manager")
@@ -1780,7 +1780,7 @@ class App(ctk.CTk):
         self.ui_scale = load_scale()
         ctk.set_widget_scaling(UI_SCALES[self.ui_scale])
         style_tree(self, UI_SCALES[self.ui_scale])
-        self.client = Client(base)
+        self.client = Client(base, token=token or None)
         self.worker = Worker(self)
         self._pages: dict[str, Page] = {}
         self._cur = None
@@ -2039,11 +2039,177 @@ class App(ctk.CTk):
         self.worker.submit(self.client.health, done)
 
 
+def _saved_token(base: str) -> str:
+    """接続履歴から base に対応する保存済みパスワードを取り出す(無ければ空)。"""
+    for r in load_connections().get("recent", []):
+        if r.get("base") == base:
+            return r.get("token") or ""
+    return ""
+
+
 def run(base: str = DEFAULT_BASE) -> None:
-    app = App(base)
+    """ローカル起動の入口。サービスがパスワード必須なら接続画面(ログイン)を出す。
+    パスワード未設定なら従来通りそのまま開く。"""
+    token = _saved_token(base)
+    try:
+        Client(base, token=token or None, timeout=5).health()
+    except ApiError as e:
+        if e.status == 401:                     # 認証必須 → ログイン画面
+            sel = connect_screen(base, token)
+            if sel:
+                run_with_token(sel[0], sel[1])
+            return
+    except ServiceUnavailable:
+        pass                                    # サービス未起動 → 下で警告付きで開く
+    run_with_token(base, token)
+
+
+# ---------------------------------------------------------------------------
+# 接続画面(接続専用GUI用): URL/トークンを入れて既存/別PCのサービスに繋ぐ
+# ---------------------------------------------------------------------------
+def _conn_store():
+    from core.paths import app_dir
+    return app_dir() / "connections.json"
+
+
+def load_connections() -> dict:
+    import json
+    try:
+        d = json.loads(_conn_store().read_text(encoding="utf-8"))
+        if isinstance(d, dict) and isinstance(d.get("recent"), list):
+            return d
+    except Exception:
+        pass
+    return {"recent": []}
+
+
+def save_connection(base: str, token: str, remember_token: bool) -> None:
+    """接続履歴を保存(先頭が最新・最大8件)。トークンは任意で保存。"""
+    import json
+    d = load_connections()
+    recent = [r for r in d.get("recent", []) if r.get("base") != base]
+    recent.insert(0, {"base": base, "token": token if remember_token else ""})
+    d["recent"] = recent[:8]
+    try:
+        _conn_store().write_text(json.dumps(d, ensure_ascii=False, indent=2),
+                                 encoding="utf-8")
+    except Exception:
+        pass
+
+
+def connect_screen(default_base: str = DEFAULT_BASE, default_token: str = ""):
+    """接続先を入力する画面。接続成功で (base, token) を返す。閉じたら None。"""
+    result = {"base": None, "token": ""}
+    win = ctk.CTk()
+    ctk.set_appearance_mode("dark")
+    ctk.ThemeManager.theme["CTkFont"]["family"] = ui_font(win)
+    win.title("GSM に接続")
+    win.geometry("470x440")
+    win.minsize(430, 420)
+    win.configure(fg_color=BG)
+
+    recent = load_connections().get("recent", [])
+    if default_base == DEFAULT_BASE and recent:      # 既定は履歴の先頭を優先
+        default_base = recent[0].get("base") or default_base
+        if not default_token:
+            default_token = recent[0].get("token") or ""
+
+    ctk.CTkLabel(win, text="🎮 GSM に接続",
+                 font=(ui_font(win), 20, "bold")).pack(pady=(22, 2))
+    ctk.CTkLabel(win, text="接続先の常駐サービス(GSM)のURLを入力してください",
+                 text_color=MUTED).pack(pady=(0, 14))
+
+    frm = ctk.CTkFrame(win, fg_color="transparent")
+    frm.pack(fill="x", padx=28)
+
+    ctk.CTkLabel(frm, text="接続先URL", anchor="w", text_color=MUTED).pack(fill="x")
+    url_var = tk.StringVar(value=default_base)
+    url_ent = ctk.CTkEntry(frm, textvariable=url_var, height=38,
+                           placeholder_text="http://127.0.0.1:8770")
+    url_ent.pack(fill="x", pady=(2, 12))
+
+    ctk.CTkLabel(frm, text="パスワード（未設定なら空）",
+                 anchor="w", text_color=MUTED).pack(fill="x")
+    tok_var = tk.StringVar(value=default_token)
+    tok_ent = ctk.CTkEntry(frm, textvariable=tok_var, height=38, show="●")
+    tok_ent.pack(fill="x", pady=(2, 8))
+
+    remember = tk.BooleanVar(value=bool(default_token))
+    ctk.CTkCheckBox(frm, text="パスワードを保存する", variable=remember,
+                    onvalue=True, offvalue=False).pack(anchor="w", pady=(0, 6))
+
+    if recent:                                        # 履歴クイック選択
+        row = ctk.CTkFrame(frm, fg_color="transparent")
+        row.pack(fill="x", pady=(4, 2))
+        ctk.CTkLabel(row, text="履歴:", text_color=MUTED).pack(side="left", padx=(0, 6))
+
+        def _use(r):
+            url_var.set(r.get("base", ""))
+            tok_var.set(r.get("token", ""))
+        for r in recent[:4]:
+            short = r.get("base", "").replace("http://", "").replace("https://", "")
+            ctk.CTkButton(row, text=short, width=10, height=26, fg_color=CARD,
+                          command=lambda r=r: _use(r)).pack(side="left", padx=2)
+
+    status = ctk.CTkLabel(win, text="", text_color=MUTED, wraplength=400)
+    status.pack(pady=(10, 0), padx=28)
+
+    def do_connect(*_):
+        base = url_var.get().strip()
+        token = tok_var.get().strip()
+        if not base:
+            status.configure(text="URLを入力してください", text_color=ERR)
+            return
+        if "://" not in base:
+            base = "http://" + base
+        btn.configure(state="disabled", text="接続中…")
+        status.configure(text="接続を確認しています…", text_color=MUTED)
+
+        def work():
+            ok, err = False, ""
+            try:
+                Client(base, token=token or None, timeout=6).health()
+                ok = True
+            except Exception as e:                    # noqa: BLE001
+                err = str(e)
+
+            def done():
+                if ok:
+                    save_connection(base, token, remember.get())
+                    result["base"], result["token"] = base, token
+                    win.destroy()
+                else:
+                    btn.configure(state="normal", text="接続")
+                    status.configure(text="接続できませんでした: " + err,
+                                     text_color=ERR)
+            win.after(0, done)
+        threading.Thread(target=work, daemon=True).start()
+
+    btn = ctk.CTkButton(win, text="接続", height=42,
+                        font=(ui_font(win), 15, "bold"), command=do_connect)
+    btn.pack(fill="x", padx=28, pady=(14, 10))
+    url_ent.bind("<Return>", do_connect)
+    tok_ent.bind("<Return>", do_connect)
+    url_ent.focus_set()
+    win.mainloop()
+    return (result["base"], result["token"]) if result["base"] else None
+
+
+def run_with_token(base: str, token: str = "") -> None:
+    app = App(base, token=token)
     if not app.client.alive():
         messagebox.showwarning(
             "GSMサービスに接続できません",
-            "常駐サービス(main_service.py)が動いていないようです。\n"
+            "接続先の常駐サービスが動いていないようです。\n"
             f"接続先: {app.client.base}", parent=app)
     app.mainloop()
+
+
+def run_connect(base: str | None = None, token: str = "") -> None:
+    """接続専用GUIの入口。URL未指定なら接続画面を出す。指定時は直接繋ぐ。"""
+    if base:
+        run_with_token(base, token)
+        return
+    sel = connect_screen(DEFAULT_BASE, token)
+    if sel:
+        run_with_token(sel[0], sel[1])

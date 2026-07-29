@@ -100,9 +100,11 @@ def _handler_factory(router: Router, token: str = "", web_dir=None):
                 raise ApiError(400, f"JSONとして読めません: {exc}") from exc
 
         def _dispatch(self, method: str) -> None:
-            # トークンが設定されている時は認証必須(LAN公開時の保護)。
+            # パスワードが設定されている時は認証必須(SCVMM型: サービス本体が管理サーバー、
+            # 各GUI/CLI/Webは認証して繋ぐコンソール)。同一PCからでも必須。静的ページ(/,
+            # /api以外)は認証不要で開ける=そこでパスワードを入力できる。
             if token and self.headers.get("X-GSM-Token", "") != token:
-                self._send(401, {"error": "認証トークンが必要/不一致です(X-GSM-Token)"})
+                self._send(401, {"error": "接続パスワードが必要/不一致です"})
                 return
             path = urlparse(self.path).path.rstrip("/") or "/"
             handler, params = router.match(method, path)

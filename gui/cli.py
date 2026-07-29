@@ -14,9 +14,28 @@ import argparse
 import time
 
 
+def _local_password(url: str) -> str:
+    """localhost 接続時、ローカルの config.yaml から api.password を読む(ホスト用の便宜)。
+    別PC接続では読まない(--password / GSM_PASSWORD を使う)。"""
+    if "127.0.0.1" not in url and "localhost" not in url:
+        return ""
+    try:
+        import yaml
+        from core.paths import app_dir
+        raw = yaml.safe_load((app_dir() / "config.yaml").read_text(encoding="utf-8")) or {}
+        api = raw.get("api") or {}
+        return str(api.get("password") or api.get("token") or "")
+    except Exception:
+        return ""
+
+
 def run_cli(url: str, argv: list[str]) -> int:
     from gui.client import ApiError, Client, ServiceUnavailable
     c = Client(url, timeout=60)
+    if not c.token:                         # 明示指定/環境変数が無ければ
+        pw = _local_password(url)           # 同一PCならconfigから補完
+        if pw:
+            c.token = pw
 
     p = argparse.ArgumentParser(prog="gsm --cli", description="GSM コンソール")
     sub = p.add_subparsers(dest="cmd")
