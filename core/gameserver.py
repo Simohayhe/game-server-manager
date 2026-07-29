@@ -52,6 +52,10 @@ class GameServerProfile:
     players_pattern: str | None = None
     # serviceから自動生成されるコマンドを個別に上書きできる
     commands: dict[str, str] = field(default_factory=dict)
+    # ---- 直接(Hyper-Vなし)モード用: このPC上でプロセスとして動かす ----
+    directory: str | None = None   # サーバー本体の作業ディレクトリ(ローカルパス)
+    launch: str | None = None      # 起動コマンド(cwd=directory で実行)
+    stop_cmd: str = "stop"         # 停止用RCONコマンド(例 stop / save && stop)
 
     @property
     def mods_dir(self) -> str:

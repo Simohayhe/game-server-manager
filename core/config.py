@@ -70,6 +70,7 @@ class AppConfig:
     pal_hosts: list = field(default_factory=list)  # ホストで動くPalworldサーバー群
     backup: BackupConfig | None = None     # バックアップ設定(未設定可)
     curseforge_api_key: str = ""           # CurseForge APIキー(mod検索/導入用。未設定可)
+    deployment: str = "hyperv"             # "hyperv"(VM運用) or "direct"(このPCで直接実行)
 
 
 class ConfigError(Exception):
@@ -83,16 +84,20 @@ def load_config(path: str | Path) -> AppConfig:
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
+    # deployment: "hyperv"(既定・VM/SSH運用) or "direct"(このPCで直接プロセス実行)
+    deployment = str(raw.get("deployment", "hyperv")).lower()
+    direct = (deployment == "direct")
+
     hv_raw = raw.get("hyperv") or {}
     hyperv = HyperVConfig(
-        mode=hv_raw.get("mode", "ssh"),
+        mode=hv_raw.get("mode", "local" if direct else "ssh"),
         host=hv_raw.get("host"),
         user=hv_raw.get("user"),
         port=hv_raw.get("port", 22),
         key=hv_raw.get("key"),
         password=hv_raw.get("password"),
     )
-    if hyperv.mode == "ssh" and not hyperv.host:
+    if not direct and hyperv.mode == "ssh" and not hyperv.host:
         raise ConfigError("hyperv.mode: ssh の場合は hyperv.host を設定してください")
 
     servers: list[GameServerProfile] = []
@@ -102,18 +107,23 @@ def load_config(path: str | Path) -> AppConfig:
         rcon = None
         if rcon_raw:
             rcon = RconConfig(port=int(rcon_raw["port"]), password=str(rcon_raw["password"]))
-        if not s.get("address"):
-            raise ConfigError(f"servers.{name}: address(VMのIPアドレス)は必須です")
-        if not ssh_raw.get("user"):
-            raise ConfigError(f"servers.{name}: ssh.user は必須です")
+        if direct:                     # 直接モード: VM/SSHは不要。directory+launch が必須
+            if not s.get("directory") or not s.get("launch"):
+                raise ConfigError(
+                    f"servers.{name}: 直接モードでは directory と launch が必須です")
+        else:
+            if not s.get("address"):
+                raise ConfigError(f"servers.{name}: address(VMのIPアドレス)は必須です")
+            if not ssh_raw.get("user"):
+                raise ConfigError(f"servers.{name}: ssh.user は必須です")
         servers.append(GameServerProfile(
             name=name,
             display_name=s.get("display_name", name),
-            address=s["address"],
+            address=s.get("address") or "127.0.0.1",
             game=s.get("game", "minecraft"),
             fqdn=s.get("fqdn"),
             vm=s.get("vm"),
-            ssh_user=ssh_raw["user"],
+            ssh_user=ssh_raw.get("user", ""),
             ssh_port=int(ssh_raw.get("port", 22)),
             ssh_key=ssh_raw.get("key"),
             ssh_password=ssh_raw.get("password"),
@@ -128,6 +138,9 @@ def load_config(path: str | Path) -> AppConfig:
             version_pattern=s.get("version_pattern"),
             players_pattern=s.get("players_pattern"),
             commands=s.get("commands") or {},
+            directory=s.get("directory"),
+            launch=s.get("launch"),
+            stop_cmd=s.get("stop_cmd", "stop"),
         ))
 
     mysql = None
@@ -258,4 +271,4 @@ def load_config(path: str | Path) -> AppConfig:
                      network=network, publish=publish, mod_sync=mod_sync,
                      curseforge_api_key=curseforge_api_key,
                      ark_hosts=ark_hosts, ark_steamcmd=raw.get("ark_steamcmd", ""),
-                     pal_hosts=pal_hosts, backup=backup)
+                     pal_hosts=pal_hosts, backup=backup, deployment=deployment)

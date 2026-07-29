@@ -23,6 +23,31 @@ _FIELD = "#2b3847"
 def _build_yaml(v: dict) -> str:
     """フォーム値から config.yaml のテキストを組み立てる(コメント付き)。"""
     lines = ["# ゲームサーバーマネージャー 設定(セットアップウィザードが生成)", ""]
+    if v.get("deployment") == "direct":
+        # 直接(Hyper-Vなし)モード: このPC上でプロセスとして動かす。VM/ネットワーク不要。
+        lines += [
+            "deployment: direct   # このPCで直接実行(VM/Hyper-V不要)",
+            "hyperv:",
+            "  mode: local",
+            "",
+            "# サーバーはGUIから追加します。手動で書く場合の例:",
+            "# servers:",
+            "#   myserver:",
+            "#     game: minecraft",
+            "#     display_name: マイサーバー",
+            "#     directory: 'C:\\Servers\\mc'      # サーバー本体の場所",
+            "#     launch: 'java -Xmx4G -jar server.jar nogui'",
+            "#     game_port: 25565",
+            "#     rcon: {port: 25575, password: xxxx}",
+            "#     players_command: list",
+            "#     stop_cmd: stop",
+            "",
+        ]
+        if v.get("cf_key", "").strip():
+            lines += ["curseforge:", f"  api_key: '{v['cf_key'].strip()}'", ""]
+        lines += ["backup:", r"  path: 'C:\GameBackups'", "  keep: 10",
+                  "  retention_days: 0", "  compress: true", ""]
+        return "\n".join(lines)
     # hyperv
     lines.append("hyperv:")
     if v["mode"] == "ssh":
@@ -118,6 +143,34 @@ def run(config_path: str | Path, auto_close_ms: int | None = None) -> bool:
                      font=("Yu Gothic UI", 8), anchor="w").pack(fill=tk.X)
         return row
 
+    # --- デプロイ方式(Hyper-Vを使う/使わない) ---
+    from core import compat
+    _compat = compat.check()
+    hyperv_ok = bool(_compat.get("suitable"))
+    sec_deploy = section("デプロイ方式")
+    deploy_var = tk.StringVar(value="hyperv" if hyperv_ok else "direct")
+    entries["deployment"] = deploy_var
+    rb_hv = tk.Radiobutton(
+        sec_deploy, text="Hyper-V(VM)で運用する(推奨・複数ゲームをVM分離)",
+        variable=deploy_var, value="hyperv", bg=_CARD, fg=_FG, selectcolor=_FIELD,
+        font=base, anchor="w", command=lambda: _deploy_toggle())
+    rb_hv.pack(fill=tk.X)
+    tk.Radiobutton(
+        sec_deploy, text="このPCで直接動かす(VMなし・Hyper-V不要・手軽)",
+        variable=deploy_var, value="direct", bg=_CARD, fg=_FG, selectcolor=_FIELD,
+        font=base, anchor="w", command=lambda: _deploy_toggle()).pack(fill=tk.X)
+    deploy_note = tk.Label(sec_deploy, text="", bg=_CARD, fg=_MUTED,
+                           font=("Yu Gothic UI", 8), anchor="w", justify="left")
+    deploy_note.pack(fill=tk.X)
+    if not hyperv_ok:                 # Hyper-Vが使えない環境=直接モードに固定
+        rb_hv.configure(state=tk.DISABLED)
+        reason = {"os": "Windows以外のため", "no_hyperv": "Hyper-Vが無効/未対応のため",
+                  "permission": "VM操作の権限が無いため"}.get(_compat.get("reason"),
+                                                              "この環境では")
+        deploy_note.configure(
+            text=f"⚠ {reason}Hyper-Vが使えないので「直接モード」で作成します。\n"
+                 "(サーバーは後からGUIで追加します)")
+
     # --- 動作モード ---
     sec_mode = section("動作モード")
     mode_var = tk.StringVar(value="local")
@@ -160,6 +213,17 @@ def run(config_path: str | Path, auto_close_ms: int | None = None) -> bool:
     field(sec_cf, "cf_key", "APIキー", "",
           hint="console.curseforge.com で無料発行。空でもModrinthは使えます")
 
+    def _deploy_toggle():
+        # 直接モードでは VM系セクション(動作モード/ネットワーク/DNS)を隠す
+        direct = (deploy_var.get() == "direct")
+        for sec in (sec_mode, sec_net, sec_dns):
+            if direct:
+                sec.pack_forget()
+            elif not sec.winfo_ismapped():
+                sec.pack(fill=tk.X, pady=6, before=sec_cf)
+        if not direct:
+            _toggle()
+
     def _toggle():
         st_ssh = tk.NORMAL if mode_var.get() == "ssh" else tk.DISABLED
         for w in ssh_box.winfo_children():
@@ -173,6 +237,7 @@ def run(config_path: str | Path, auto_close_ms: int | None = None) -> bool:
                     c.configure(state=st_dns)
 
     _toggle()
+    _deploy_toggle()
 
     bar = tk.Frame(root, bg=_BG)
     bar.pack(fill=tk.X, padx=18, pady=12)
@@ -180,14 +245,16 @@ def run(config_path: str | Path, auto_close_ms: int | None = None) -> bool:
     def create():
         v = {k: (var.get() if hasattr(var, "get") else var)
              for k, var in entries.items()}
-        # 軽い検証
-        if v["mode"] == "ssh" and not v["ssh_host"].strip():
-            messagebox.showwarning("入力", "SSHモードではホストIPが必要です", parent=root)
-            return
-        for k in ("subnet", "gateway", "vm_range"):
-            if not v[k].strip():
-                messagebox.showwarning("入力", "ネットワーク項目を埋めてください", parent=root)
+        # 直接モードはVM/ネットワークの入力は不要
+        if v.get("deployment") != "direct":
+            if v["mode"] == "ssh" and not v["ssh_host"].strip():
+                messagebox.showwarning("入力", "SSHモードではホストIPが必要です", parent=root)
                 return
+            for k in ("subnet", "gateway", "vm_range"):
+                if not v[k].strip():
+                    messagebox.showwarning("入力", "ネットワーク項目を埋めてください",
+                                           parent=root)
+                    return
         text = _build_yaml(v)
         try:
             config_path.write_text(text, encoding="utf-8")

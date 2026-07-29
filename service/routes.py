@@ -83,6 +83,7 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             "ok": True,
             "ark_maps": len(ctx.arkhosts),
             "servers": len(ctx.servers),
+            "direct": bool(getattr(ctx, "direct", False)),
             "state_age_sec": round(state.age(), 1),
             "busy_lanes": jobs.busy_lanes(),
             "ip_conflicts": (state.meta() or {}).get("ip_conflicts") or [],
@@ -868,9 +869,14 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             mark("stop" if act == "stop" else "restart", f"mc:{name}")
         from core.orchestration import start_server_with_vm
         # 起動はVMがOffなら先にVM起動→SSH応答待ち→サービス起動(VM自動起動)。
+        # 直接モードはVMが無いのでプロセスを直接起動する。
         # 停止/再起動はプレイヤーへ予告(MC=say / Palworld=Broadcast)してから。
+        if getattr(ctx, "direct", False):
+            start_fn = lambda: srv.start(progress=jobs.progress)
+        else:
+            start_fn = lambda: start_server_with_vm(ctx.hyperv, srv, progress=jobs.progress)
         fn_map = {
-            "start": lambda: start_server_with_vm(ctx.hyperv, srv, progress=jobs.progress),
+            "start": start_fn,
             "stop": lambda: srv.stop_with_notice(progress=jobs.progress),
             "restart": lambda: srv.restart_with_notice(progress=jobs.progress),
         }

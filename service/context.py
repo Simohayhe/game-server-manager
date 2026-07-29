@@ -37,13 +37,19 @@ class Context:
             self.config = cfg
             self.backupcfg: backup_mod.BackupConfig = cfg.backup
             self.ark_steamcmd = getattr(cfg, "ark_steamcmd", "") or ""
+            self.direct = (getattr(cfg, "deployment", "hyperv") == "direct")
             self.arkhosts = [ArkHost(c, self.runner) for c in cfg.ark_hosts]
             self._apply_ark_event()
-            # MC/Palworld は GameServer(profile) が中でSSHを張る(gui/app.py:477 と同じ)
-            from core.gameserver import GameServer      # 遅延import(循環回避)
             from core.hyperv import HyperVManager
-            self.servers = {p.name: GameServer(p) for p in cfg.servers}
             self.hyperv = HyperVManager(self.runner)
+            if self.direct:
+                # 直接モード: VM/SSHなし。このPC上のプロセスとして動かす。
+                from core.localserver import LocalGameServer
+                self.servers = {p.name: LocalGameServer(p) for p in cfg.servers}
+            else:
+                # 通常(Hyper-V)モード: GameServer が中でSSHを張る。
+                from core.gameserver import GameServer  # 遅延import(循環回避)
+                self.servers = {p.name: GameServer(p) for p in cfg.servers}
 
     # ---- ARK季節イベント(-ActiveEvent) ----
     def ark_event_path(self) -> Path:

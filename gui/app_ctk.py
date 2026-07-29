@@ -1785,6 +1785,11 @@ class App(ctk.CTk):
         self._pages: dict[str, Page] = {}
         self._cur = None
         self._navbtn: dict[str, ctk.CTkButton] = {}
+        # 直接(Hyper-Vなし)モードか。VM/クラスタタブの表示可否に使う(起動時に1回取得)。
+        try:
+            self._direct = bool(self.client.health().get("direct", False))
+        except Exception:
+            self._direct = False
 
         self._head()
         body = ctk.CTkFrame(self, fg_color="transparent")
@@ -1918,7 +1923,11 @@ class App(ctk.CTk):
         s = ctk.CTkFrame(parent, fg_color=SIDE, width=196, corner_radius=0)
         s.pack(side="left", fill="y")
         s.pack_propagate(False)
+        # 直接モードではVM/クラスタは使わないので隠す
+        hidden = {"vm", "cluster"} if getattr(self, "_direct", False) else set()
         for key, label, kind in self.NAV:
+            if key in hidden:
+                continue
             if kind == "head":
                 ctk.CTkLabel(s, text=label, text_color=MUTED, anchor="w",
                              font=ctk.CTkFont(size=10, weight="bold")

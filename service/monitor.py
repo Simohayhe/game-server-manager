@@ -261,6 +261,9 @@ class Monitor:
         旧GUIの教訓(CLAUDE.md): 停止中VMにもSSHを試すと1台あたり8秒のタイムアウトで
         待たされ、監視が詰まる。先にVM状態を見て、Offなら即「停止」と判断する。
         """
+        if getattr(self.ctx, "direct", False):    # 直接モードはVMなし
+            self._vm_list_cache = []
+            return {}
         try:
             vms = self.ctx.hyperv.list_vms()                  # VMInfo(name, state, ...)
             self._vm_list_cache = [
