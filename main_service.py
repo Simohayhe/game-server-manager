@@ -77,6 +77,9 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
         except Exception as exc:            # noqa: BLE001
             print("復帰処理で例外:", exc)
     threading.Thread(target=_restore, name="gsm-host-restore", daemon=True).start()
+    # 障害中に送れなかった通知を、復旧後に送り直す常駐スレッド
+    threading.Thread(target=_notify_retry_loop, name="gsm-notify-retry",
+                     daemon=True).start()
     return svc
 
 
@@ -126,7 +129,24 @@ def _safe_send(notify, url: str, text: str) -> None:
     try:
         notify.send(url, text)
     except Exception as exc:
-        print("通知の送信に失敗:", exc)
+        # 送れない=ネットワーク/ルーター障害中のことが多い。捨てると「障害に
+        # 気づけない」ので保留し、復旧後に _notify_retry_loop がまとめて送る。
+        print("通知の送信に失敗(保留にして後で再送):", exc)
+        notify.queue_add(url, text)
+
+
+def _notify_retry_loop() -> None:
+    """保留中の通知を定期的に送り直す(ネットワーク復旧を待つ)。"""
+    import time
+    from core import notify
+    while True:
+        time.sleep(120)
+        try:
+            res = notify.queue_flush()
+            if res.get("sent"):
+                print(f"保留していた通知を送信: {res['sent']}件 (残り{res['left']}件)")
+        except Exception as exc:            # noqa: BLE001 ループは止めない
+            print("通知の再送で例外:", exc)
 
 
 def _already_running(port: int) -> bool:

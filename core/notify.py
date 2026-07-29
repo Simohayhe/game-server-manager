@@ -139,6 +139,73 @@ def config_from_dict(d: dict) -> NotifyConfig:
     return NotifyConfig(enabled=bool(d.get("enabled", False)), destinations=dests)
 
 
+# ---------------------------------------------------------------------------
+# 送信できなかった通知の保留と再送
+#
+# ネットワーク/ルーターが落ちている間は Discord へ届かない=「障害そのものを知らせ
+# られない」。実際にルーター再起動でDNSが4時間半止まったのに通知が1件も出なかった。
+# 経路が死んでいる最中の通知は原理的に不可能なので、**捨てずに貯めて復旧後に送る**。
+# リアルタイム性は諦めるが「気づかないまま放置」は防げる。
+# ---------------------------------------------------------------------------
+QUEUE_MAX = 200          # 貯めすぎない(復旧時に何百通も飛ぶと逆に読めない)
+QUEUE_MAX_AGE_SEC = 86400  # 1日より古い通知は今さら送っても意味がないので捨てる
+
+
+def _queue_path() -> Path:
+    from .paths import app_dir
+    return app_dir() / "notify_queue.json"
+
+
+def queue_add(webhook_url: str, text: str) -> None:
+    """送信に失敗した通知を保留リストに積む(失敗しても呼び出し側は止めない)。"""
+    import time
+    try:
+        p = _queue_path()
+        try:
+            items = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            items = []
+        items.append({"at": time.time(), "url": webhook_url, "text": text})
+        p.write_text(json.dumps(items[-QUEUE_MAX:], ensure_ascii=False),
+                     encoding="utf-8")
+    except OSError:
+        pass
+
+
+def queue_flush(timeout: float = 8) -> dict:
+    """保留中の通知を送る。1件でも失敗したら残りは次回に回す(復旧待ち)。
+
+    いつ起きたか分からないと意味がないので、本文に発生時刻を添えて送る。
+    """
+    import datetime as _dt
+    import time
+    p = _queue_path()
+    try:
+        items = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"sent": 0, "left": 0}
+    if not items:
+        return {"sent": 0, "left": 0}
+    now = time.time()
+    items = [it for it in items if now - float(it.get("at", 0)) <= QUEUE_MAX_AGE_SEC]
+    sent = 0
+    while items:
+        it = items[0]
+        when = _dt.datetime.fromtimestamp(float(it.get("at", now))).strftime("%H:%M")
+        try:
+            send(it.get("url", ""), f"⏳ [{when} に送信できなかった通知] {it.get('text','')}",
+                 timeout=timeout)
+        except Exception:                     # noqa: BLE001 まだ復旧していない
+            break
+        items.pop(0)
+        sent += 1
+    try:
+        p.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return {"sent": sent, "left": len(items)}
+
+
 def send(webhook_url: str, text: str, username: str = "GameServerManager",
          timeout: float = 8) -> None:
     """Discord Webhookへメッセージを送る(例外は呼び出し側で扱う)。"""
