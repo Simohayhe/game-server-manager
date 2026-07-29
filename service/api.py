@@ -141,12 +141,14 @@ class ApiServer:
     """常駐サービスに登録して使う(start/stop を持つ)。"""
 
     def __init__(self, router: Router, port: int = API_PORT_DEFAULT,
-                 host: str = "127.0.0.1", token: str = "", web_dir=None):
+                 host: str = "127.0.0.1", token: str = "", web_dir=None,
+                 optional: bool = False):
         self.router = router
         self.host = host
         self.port = port
         self.token = token
         self.web_dir = web_dir
+        self.optional = optional        # Trueなら待受失敗でも例外にしない(追加ポート用)
         self._srv: http.server.ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -161,12 +163,20 @@ class ApiServer:
     def start(self) -> None:
         if self._srv is not None:
             return
-        self._srv = http.server.ThreadingHTTPServer(
-            (self.host, self.port),
-            _handler_factory(self.router, self.token, self.web_dir))
+        try:
+            self._srv = http.server.ThreadingHTTPServer(
+                (self.host, self.port),
+                _handler_factory(self.router, self.token, self.web_dir))
+        except OSError as exc:
+            # 追加待受(80番など)が塞がっている/権限不足でも本体は動かし続ける。
+            if self.optional:
+                print(f"ポート {self.port} で待受できませんでした(続行): {exc}")
+                self._srv = None
+                return
+            raise
         self._srv.daemon_threads = True
         self._thread = threading.Thread(target=self._srv.serve_forever,
-                                        name="gsm-api", daemon=True)
+                                        name=f"gsm-api-{self.port}", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:

@@ -48,10 +48,23 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
                     web_dir=_web_dir())
 
     # 起動順: 配信 → 監視 → 予約 → ポート同期 → 採取 → API(最後=全部揃ってから受付)
-    for c in (dyn, mon, sched, ports, sampler, api):
+    components = [dyn, mon, sched, ports, sampler, api]
+
+    # 追加待受(既定80): ブラウザで http://<ホスト>/ とポート無しで開けるようにする。
+    # 同じルータ/認証を共有するので、8770と機能・パスワードは同一。
+    web_port = int(getattr(ctx.config, "api_web_port", 0) or 0)
+    api_web = None
+    if web_port and web_port != api_port:
+        api_web = ApiServer(api.router, port=web_port,
+                            host=getattr(ctx.config, "api_host", "127.0.0.1"),
+                            token=getattr(ctx.config, "api_token", ""),
+                            web_dir=_web_dir(), optional=True)
+        components.append(api_web)
+
+    for c in components:
         svc.add(c)
     svc.ctx_extra = {"state": state, "dyn": dyn, "sched": sched, "api": api,
-                     "ports": ports, "rec": rec, "history": hist}
+                     "ports": ports, "rec": rec, "history": hist, "api_web": api_web}
 
     # PC再起動後の復帰: 再起動前に動いていたARKマップを起動し直す(VMはHyper-V任せ)。
     # 起動をブロックしないよう別スレッドで。記録が無ければ何もしない。

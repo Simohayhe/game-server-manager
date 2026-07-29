@@ -73,6 +73,7 @@ class AppConfig:
     deployment: str = "hyperv"             # "hyperv"(VM運用) or "direct"(このPCで直接実行)
     api_host: str = "127.0.0.1"            # API待受(既定=localhost限定。0.0.0.0でLAN公開)
     api_token: str = ""                    # API接続パスワード(LAN公開時に推奨。空=認証なし)
+    api_web_port: int = 0                  # 追加待受ポート(例80)。指定でポート無しURLでも開ける
 
 
 class ConfigError(Exception):
@@ -276,4 +277,5 @@ def load_config(path: str | Path) -> AppConfig:
                      pal_hosts=pal_hosts, backup=backup, deployment=deployment,
                      api_host=str((raw.get("api") or {}).get("host", "127.0.0.1")),
                      api_token=str((raw.get("api") or {}).get("password")
-                                   or (raw.get("api") or {}).get("token", "")))
+                                   or (raw.get("api") or {}).get("token", "")),
+                     api_web_port=int((raw.get("api") or {}).get("web_port", 0) or 0))
