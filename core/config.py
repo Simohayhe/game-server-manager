@@ -71,6 +71,11 @@ class AppConfig:
     backup: BackupConfig | None = None     # バックアップ設定(未設定可)
     curseforge_api_key: str = ""           # CurseForge APIキー(mod検索/導入用。未設定可)
     deployment: str = "hyperv"             # "hyperv"(VM運用) or "direct"(このPCで直接実行)
+    # 外部への死活信号(デッドマンスイッチ)。未設定=無効。
+    # 家のネット/ルーター/PCごと落ちた時、外部サービス側が「信号が来ない」ことで
+    # リアルタイムに気づける(内側からの通知は経路が死ぬと送れないため)。
+    heartbeat_url: str = ""
+    heartbeat_interval_min: int = 5
     api_host: str = "127.0.0.1"            # API待受(既定=localhost限定。0.0.0.0でLAN公開)
     api_token: str = ""                    # API接続パスワード(LAN公開時に推奨。空=認証なし)
     api_web_port: int = 0                  # 追加待受ポート(例80)。指定でポート無しURLでも開ける
@@ -277,6 +282,10 @@ def load_config(path: str | Path) -> AppConfig:
                      curseforge_api_key=curseforge_api_key,
                      ark_hosts=ark_hosts, ark_steamcmd=raw.get("ark_steamcmd", ""),
                      pal_hosts=pal_hosts, backup=backup, deployment=deployment,
+                     heartbeat_url=str((raw.get("monitoring") or {}).get(
+                         "heartbeat_url", "") or ""),
+                     heartbeat_interval_min=int((raw.get("monitoring") or {}).get(
+                         "interval_min", 5) or 5),
                      api_host=str((raw.get("api") or {}).get("host", "127.0.0.1")),
                      api_token=str((raw.get("api") or {}).get("password")
                                    or (raw.get("api") or {}).get("token", "")),
