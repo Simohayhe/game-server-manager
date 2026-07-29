@@ -13,6 +13,9 @@ arkbehavior.json
 arkevent.json
 clusters.json
 host_restore.json
+rolling_state.json
+# 接続先の履歴。接続パスワードを保存しうるので絶対に公開しない
+connections.json
 permissions.json
 permissions.json.tmp
 logs/
