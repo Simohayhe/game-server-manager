@@ -89,6 +89,9 @@ class AppConfig:
     # リアルタイムに気づける(内側からの通知は経路が死ぬと送れないため)。
     heartbeat_url: str = ""
     heartbeat_interval_min: int = 5
+    # GSMが管理しないサービス(Velocityプロキシ等)の常時ポート転送。
+    # ルーター再起動でUPnP設定が消えても、ポート同期がここを見て復活させる。
+    portsync_extra: list = field(default_factory=list)
     syslog: "SyslogConfig | None" = None    # syslog受信(未設定=無効)
     api_host: str = "127.0.0.1"            # API待受(既定=localhost限定。0.0.0.0でLAN公開)
     api_token: str = ""                    # API接続パスワード(LAN公開時に推奨。空=認証なし)
@@ -310,6 +313,7 @@ def load_config(path: str | Path) -> AppConfig:
                      ark_hosts=ark_hosts, ark_steamcmd=raw.get("ark_steamcmd", ""),
                      pal_hosts=pal_hosts, backup=backup, deployment=deployment,
                      syslog=_parse_syslog(raw.get("syslog")),
+                     portsync_extra=list((raw.get("portsync") or {}).get("extra") or []),
                      heartbeat_url=str((raw.get("monitoring") or {}).get(
                          "heartbeat_url", "") or ""),
                      heartbeat_interval_min=int((raw.get("monitoring") or {}).get(

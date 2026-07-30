@@ -83,6 +83,18 @@ class PortSyncService:
                 label=f"{p.game}-{name}", ext_port=(p.external_port or p.game_port),
                 internal_ip=p.address, internal_port=p.game_port, proto=proto,
                 desired=running))
+        # 追加で常時開けておきたい転送(プロキシ等、GSMが管理しないサービス用)。
+        # config の portsync.extra に書く。ルーター再起動で消えても自動で復活する。
+        for e in (getattr(self.ctx.config, "portsync_extra", None) or []):
+            try:
+                specs.append(portsync.PortSpec(
+                    label=str(e.get("label") or "extra"),
+                    ext_port=int(e["ext_port"]), internal_ip=str(e["ip"]),
+                    internal_port=int(e.get("port") or e["ext_port"]),
+                    proto=str(e.get("proto", "TCP")).upper(), desired=True))
+            except (KeyError, TypeError, ValueError) as exc:
+                print("portsync.extra の項目が不正(スキップ):", e, exc)
+
         # 自前DNSの外部公開(WAN:53 → ipam:auth_port)。ゲームと違い常時開けておく。
         # ルーター再起動でUPnP設定が飛んでもここで自動復活する(過去に静かに公開が
         # 止まってドメインが引けなくなった事故があったため、GSMの管理対象に含める)。
