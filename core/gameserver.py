@@ -53,6 +53,10 @@ class GameServerProfile:
     # serviceから自動生成されるコマンドを個別に上書きできる
     commands: dict[str, str] = field(default_factory=dict)
     # ---- 直接(Hyper-Vなし)モード用: このPC上でプロセスとして動かす ----
+    # プロキシ(Velocity等)配下のバックエンド。Trueだと自動ポート開放の対象外にする。
+    # プロキシ運用では online-mode=false にするため、直接公開すると誰でも他人に
+    # なりすませてしまう。公開してよいのはプロキシだけ。
+    proxied: bool = False
     directory: str | None = None   # サーバー本体の作業ディレクトリ(ローカルパス)
     launch: str | None = None      # 起動コマンド(cwd=directory で実行)
     stop_cmd: str = "stop"         # 停止用RCONコマンド(例 stop / save && stop)

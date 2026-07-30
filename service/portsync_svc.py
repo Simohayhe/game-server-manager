@@ -73,6 +73,8 @@ class PortSyncService:
         for name, srv in self.ctx.servers.items():
             p = srv.profile
             cached = self.state.server_one(name)
+            if getattr(p, "proxied", False):
+                continue        # プロキシ配下=直接公開しない(online-mode=falseのため危険)
             if not p.game_port or not cached or cached.get("status") is None:
                 continue                                   # 状態未取得はスキップ
             running = (cached.get("status") == "active")

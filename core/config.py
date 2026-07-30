@@ -172,6 +172,7 @@ def load_config(path: str | Path) -> AppConfig:
             version_pattern=s.get("version_pattern"),
             players_pattern=s.get("players_pattern"),
             commands=s.get("commands") or {},
+            proxied=bool(s.get("proxied", False)),
             directory=s.get("directory"),
             launch=s.get("launch"),
             stop_cmd=s.get("stop_cmd", "stop"),
