@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -29,11 +30,20 @@ API = f"http://127.0.0.1:{PORT}"
 
 
 def _service_alive() -> bool:
+    """常駐サービスが動いているか。
+
+    **HTTPで応答が返った時点で「生きている」**とみなす。401(パスワード必須)も
+    サービスが応答している証拠なので生存扱いにすること。ここを例外=死亡と誤判定
+    すると、GUIがもう1つサービスを起動してしまい、監視・通知・予約が二重に走る
+    (実際に api.password を設定した直後、Discord通知が毎回2回飛ぶ事故が起きた)。
+    """
     try:
         urllib.request.urlopen(API + "/api/health", timeout=1.5)
         return True
+    except urllib.error.HTTPError:
+        return True                      # 401/403等=応答している=生きている
     except Exception:
-        return False
+        return False                     # 接続不可(ConnectionRefused等)=いない
 
 
 def _spawn_service() -> None:
@@ -88,7 +98,12 @@ def restart_service(timeout: float = 25.0) -> bool:
 
 
 def _run_service() -> int:
-    from main_service import build_service
+    from main_service import _already_running, build_service
+    # 二重起動の最後の砦。GUI側の生存判定をすり抜けても、ここで止める
+    # (二重に走ると監視・通知・予約が二重になり、通知が2回飛ぶ)。
+    if _already_running(PORT):
+        print(f"既にサービスが動いています(ポート {PORT})。二重起動を中止しました。")
+        return 0
     try:
         svc = build_service(PORT)
     except Exception as exc:
