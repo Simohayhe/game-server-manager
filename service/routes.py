@@ -90,6 +90,7 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             "state_age_sec": round(state.age(), 1),
             "busy_lanes": jobs.busy_lanes(),
             "ip_conflicts": (state.meta() or {}).get("ip_conflicts") or [],
+            "port_conflicts": (state.meta() or {}).get("port_conflicts") or [],
         }
     r.add("GET", "/api/health", health)
 

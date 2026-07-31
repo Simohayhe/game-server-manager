@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from . import dnsreg
 
+MC_DEFAULT_PORT = 25565    # これ以外のポートはSRVで隠す(プレイヤーはポート入力不要)
+
 
 def ensure_records(cfg, wan_ip: str, progress=lambda t: None) -> list[dict]:
     """proxies の fqdn を wan_ip に向ける。既に正しければ何もしない。
@@ -35,8 +37,15 @@ def ensure_records(cfg, wan_ip: str, progress=lambda t: None) -> list[dict]:
                         "reason": "cluster/fqdn どちらも未指定"})
             continue
         try:
-            dnsreg.set_a_record(dns, fqdn, wan_ip, progress=progress)
-            out.append({"name": p.name, "fqdn": fqdn, "ip": wan_ip, "ok": True})
+            if p.game == "minecraft" and p.port != MC_DEFAULT_PORT:
+                # 既定ポート以外はSRVも張る。これが無いとプレイヤーがポートを
+                # 手入力する必要があり、逆に「この名前だけが入口」にもできない
+                # (WAN IPを指す他の名前が既定ポートで刺さってしまうため)。
+                dnsreg.publish_server(dns, fqdn, wan_ip, p.port, progress=progress)
+            else:
+                dnsreg.set_a_record(dns, fqdn, wan_ip, progress=progress)
+            out.append({"name": p.name, "fqdn": fqdn, "ip": wan_ip,
+                        "port": p.port, "srv": p.port != MC_DEFAULT_PORT, "ok": True})
         except Exception as exc:              # noqa: BLE001 1件失敗で全体を止めない
             out.append({"name": p.name, "fqdn": fqdn, "ok": False,
                         "reason": str(exc)})
@@ -49,10 +58,16 @@ def summary(cfg) -> list[dict]:
     out = []
     for p in (getattr(cfg, "proxies", None) or []):
         fqdn = p.resolve_fqdn(domain)
+        # Minecraftは既定ポート以外でもSRVを張るのでポート入力は要らない。
+        # FQDNが無い(DNS未設定)時だけIP:ポートで案内する。
+        srv = (p.game == "minecraft" and p.port != MC_DEFAULT_PORT and bool(fqdn))
+        if fqdn:
+            connect = fqdn if (p.port == MC_DEFAULT_PORT or srv) else f"{fqdn}:{p.port}"
+        else:
+            connect = f"{p.ip}:{p.port}"
         out.append({
             "name": p.name, "ip": p.ip, "port": p.port, "proto": p.proto,
             "cluster": p.cluster, "fqdn": fqdn, "game": p.game,
-            # 25565はMinecraftの既定ポートなので、その時だけポート指定が要らない
-            "connect": (fqdn or p.ip) + ("" if p.port == 25565 else f":{p.port}"),
+            "srv": srv, "connect": connect,
         })
     return out

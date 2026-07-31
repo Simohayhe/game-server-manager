@@ -304,6 +304,46 @@ class Monitor:
             if ip not in current:
                 self._notify_dns("ip_conflict", f"✅ IP競合が解消しました: {ip}")
 
+    def _check_port_conflicts(self) -> None:
+        """設定上のポート重複を検知する。
+
+        ARKは全マップが同じホストで動くので、Port/Queryport/RCONPortが被ると
+        後から起動した方が待受けできず「起動しない」原因になる(気づきにくい)。
+        WAN側の外部ポート重複も転送が上書きされて別サーバーに繋がる事故になる。
+        """
+        from core import portcheck
+        try:
+            host_ip = ""
+            try:
+                from core import upnp
+                host_ip = upnp.local_ip_toward(self.ctx.config.network.gateway)
+            except Exception:
+                pass
+            conflicts = portcheck.find_conflicts(self.ctx.config, host_ip)
+        except Exception as exc:                  # noqa: BLE001 監視は止めない
+            print("ポート競合チェックで例外:", exc)
+            return
+        current = {f"{c['scope']}:{c['where']}:{c['proto']}/{c['port']}": c
+                   for c in conflicts}
+        prev = getattr(self, "_port_conflicts", {})
+        self._port_conflicts = current
+        try:
+            self.state.set_meta(port_conflicts=list(current.values()))
+        except Exception:
+            pass
+        for key, c in current.items():
+            if key not in prev:
+                who = " と ".join(c["owners"])
+                print(f"⚠ ポート競合検知: {c['where']} {c['proto']}/{c['port']} ({who})")
+                self._notify_dns(
+                    "ip_conflict",
+                    f"⚠ ポート競合: {c['where']} の {c['proto']}/{c['port']} を "
+                    f"{who} が取り合っています。片方を別のポートに変えてください"
+                    "(後から起動した方が待受けできず起動失敗します)。")
+        for key in prev:
+            if key not in current:
+                self._notify_dns("ip_conflict", f"✅ ポート競合が解消しました: {key}")
+
     def _server_version(self, srv) -> str | None:
         """サーバーのゲームバージョンを取得。Palworldは RCON Info から拾う。
 
@@ -366,6 +406,7 @@ class Monitor:
         vms = self._vm_states()
         self.state.set_meta(vms=self._vm_list_cache)   # VM一覧もAPIから即返せるように
         self._check_ip_conflicts(vms)
+        self._check_port_conflicts()
         for name, srv in self.ctx.servers.items():
             vm = srv.profile.vm
             # VMが止まっているサーバーはSSHせず即「停止」= 8秒×台数の待ちを回避
