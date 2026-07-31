@@ -41,10 +41,12 @@ def _grp(name: str) -> str:
 
 
 class ClusterManager:
-    def __init__(self, config, runner, base_dir=None):
+    def __init__(self, config, runner, base_dir=None, config_path=None):
         self.config = config
         self.runner = runner
         self.base = Path(base_dir or app_dir())
+        # proxied の書き戻しに使う。未指定なら base 直下の config.yaml
+        self.config_path = Path(config_path) if config_path else self.base / "config.yaml"
         self.state_path = self.base / "clusters.json"
         self.modcache = self.base / "modcache"
 
@@ -85,6 +87,22 @@ class ClusterManager:
     def save(self, data) -> None:
         self.state_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _set_proxied(self, server: str, proxied: bool,
+                     progress=lambda t: None) -> None:
+        """クラスタ加入/脱退に合わせて config の proxied を切り替える。
+
+        プロキシ配下のサーバーは online-mode=false で動かすため、直接公開すると
+        誰でもなりすませる。よって加入時は公開対象から外し(proxied=true)、
+        脱退時は元に戻す。手で付け外しすると必ず片方を忘れるので連動させる。
+        """
+        from . import settings
+        try:
+            settings.update_config(
+                self.config_path, {"servers": {server: {"proxied": bool(proxied)}}})
+            progress(f"{server}: 直接公開を{'停止' if proxied else '再開可能に'}しました")
+        except Exception as exc:                  # noqa: BLE001 本処理は止めない
+            progress(f"⚠ {server} の proxied 更新に失敗: {exc}")
 
     def _proxy_of(self, cluster_name: str) -> dict:
         """このクラスタを前段で受けるプロキシの接続情報。無ければ未設定を返す。"""
@@ -160,6 +178,7 @@ class ClusterManager:
         prof = self._profile(server)
         data["clusters"][cluster]["members"][server] = {"share": bool(share)}
         self.save(data)
+        self._set_proxied(server, True, progress)   # プロキシ配下=直接公開しない
         if share:
             self._ensure_share_member(cluster, prof)
         self._deploy_cluster(cluster, progress)      # 全員のcombatswitchを揃える
@@ -200,6 +219,7 @@ class ClusterManager:
         self._undeploy_server(prof, progress)
         del c["members"][server]
         self.save(data)
+        self._set_proxied(server, False, progress)   # 単独運用に戻すので公開可に
         self._deploy_cluster(cluster, progress)      # 残メンバーの/s再割当
         if not _defer_velocity:
             self._rebuild_velocity(progress)

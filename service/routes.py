@@ -784,6 +784,17 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
             raise ApiError(400, "template_id / name / host / ssh_user / ssh_password は必須です")
         if any(p.name == name for p in ctx.config.servers):
             raise ApiError(409, f"サーバー名 '{name}' は既に存在します")
+        # 既存サーバーと同じIPへ構築すると、そのVMの /opt/minecraft を上書きして
+        # 別サーバーとして二重登録され、起動/停止も互いに干渉する(実際に起きた)。
+        dup = next((p for p in ctx.config.servers if p.address == host), None)
+        if dup:
+            raise ApiError(409,
+                           f"IP {host} は既に「{dup.display_name}」({dup.name})が使用中です。"
+                           "そのVMへ構築すると既存サーバーを壊します。"
+                           "空きIPを指定するか、先にVMを作成してください")
+        vmname = (b.get("vm") or "").strip()
+        if vmname and any(p.vm == vmname for p in ctx.config.servers):
+            raise ApiError(409, f"VM名 '{vmname}' は既に別のサーバーで使われています")
         tmap = {t.id: t for t in prov.load_templates()}
         t = tmap.get(tid)
         if not t:
@@ -1688,7 +1699,7 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
     # ---------------- MC クラスタ管理 ----------------
     def _cm():
         from core.mccluster import ClusterManager
-        return ClusterManager(ctx.config, ctx.runner)
+        return ClusterManager(ctx.config, ctx.runner, config_path=ctx.config_path)
 
     def clusters_get(**_):
         return _cm().summary()
@@ -2036,12 +2047,21 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         from core import proxyreg
         rows = []
         proxied_names = set()
+        # クラスタが実在するかを見る。削除済みクラスタを指したままのプロキシは
+        # 転送とDNSだけ残って中身が無いので、気づけるように印を出す。
+        try:
+            live = {c["name"]: c for c in _cm().summary().get("clusters", [])}
+        except Exception:
+            live = {}
         for px in proxyreg.summary(ctx.config):
-            members = [s.display_name for s in ctx.config.servers
-                       if getattr(s, "proxied", False)]
+            cl = px.get("cluster") or ""
+            if cl and cl not in live:
+                note = f"⚠ クラスタ「{cl}」は存在しません(config の proxies を見直してください)"
+            else:
+                members = [m["display"] for m in live.get(cl, {}).get("members", [])]
+                note = ("配下: " + " / ".join(members)) if members else "配下サーバーなし"
             rows.append({"kind": "proxy", "display": f"🔀 {px['name']} (プロキシ)",
-                         "connect": px["connect"], "game": px["game"],
-                         "note": ("配下: " + " / ".join(members)) if members else ""})
+                         "connect": px["connect"], "game": px["game"], "note": note})
         for s in ctx.config.servers:
             if getattr(s, "proxied", False):
                 proxied_names.add(s.name)
