@@ -2026,6 +2026,38 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         r.add("POST", "/api/ports/reconcile", ports_reconcile)
 
     # ---------------- ネットワーク(DNS登録状況 / ポート管理状況) ----------------
+    def _connect_rows() -> list:
+        """プレイヤーに教える接続先の一覧。
+
+        プロキシ配下のサーバーは個別に繋げない(proxied=公開しない)ので、
+        入口はプロキシのアドレスだけ。ここで一覧にしておかないと「結局どれを
+        教えればいいのか」が分からなくなる。
+        """
+        from core import proxyreg
+        rows = []
+        proxied_names = set()
+        for px in proxyreg.summary(ctx.config):
+            members = [s.display_name for s in ctx.config.servers
+                       if getattr(s, "proxied", False)]
+            rows.append({"kind": "proxy", "display": f"🔀 {px['name']} (プロキシ)",
+                         "connect": px["connect"], "game": px["game"],
+                         "note": ("配下: " + " / ".join(members)) if members else ""})
+        for s in ctx.config.servers:
+            if getattr(s, "proxied", False):
+                proxied_names.add(s.name)
+                continue
+            if not s.fqdn:
+                continue
+            port = s.external_port or s.game_port
+            # MCは既定ポートかSRVがあれば省略、Palworldは常にポート必要
+            show_port = not (s.game == "minecraft" and port in (25565, None))
+            rows.append({
+                "kind": s.game, "display": s.display_name, "game": s.game,
+                "connect": f"{s.fqdn}:{port}" if show_port else s.fqdn,
+                "note": "" if s.external_port else "外部未公開(LAN内のみ)",
+            })
+        return rows
+
     def network_status(**_):
         """DNS登録状況とUPnPポート開放状況をまとめて返す(ネットワークタブ用)。"""
         from core import conntest
@@ -2111,7 +2143,8 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
                 "forwarded": bool(m and m.get("internal_client") == p.address),
             })
         return {"resolver": resolver, "domain": domain,
-                "dns": dns_rows, "ports": ports}
+                "dns": dns_rows, "ports": ports,
+                "connect": _connect_rows()}
     r.add("GET", "/api/network", network_status)
 
     def server_dns_register(params, **_):

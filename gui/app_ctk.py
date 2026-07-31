@@ -1485,6 +1485,20 @@ class NetworkPage(Page):
 
         self._dns_by_name: dict = {}
 
+        # ── 接続先(プレイヤーに教えるアドレス) ──
+        # プロキシ配下のサーバーは個別に繋げないので、どれを教えればよいかを
+        # ここで一目で分かるようにする(右クリックでコピーできる)。
+        ctk.CTkLabel(self, text="接続先(プレイヤーに教えるアドレス)", text_color=TEXT,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w",
+                                                                    pady=(8, 2))
+        self.conn_t = tree(
+            self, ["connect", "note"],
+            {"connect": ("アドレス", 300), "note": ("備考", 320)},
+            first="対象", first_w=220, height=4)
+        for c in ("connect", "note"):
+            self.conn_t.column(c, anchor="w")
+        self.attach_menu(self.conn_t, self._conn_menu)
+
         # ── DNS登録状況 ──
         ctk.CTkLabel(self, text="DNS登録状況", text_color=TEXT,
                      font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w",
@@ -1536,6 +1550,24 @@ class NetworkPage(Page):
     def _reconcile(self):
         self.act(self.client.ports_reconcile, "ポート同期")
 
+    def _conn_menu(self):
+        """接続先を右クリック → クリップボードへ(友達に貼って渡せるように)。"""
+        sel = self.conn_t.selection()
+        if not sel:
+            return []
+        addr = self._conn_by_iid.get(sel[0])
+        if not addr:
+            return []
+        return [(f"📋 アドレスをコピー ({addr})", lambda: self._copy(addr))]
+
+    def _copy(self, text: str):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.app.toast(f"コピーしました: {text}")
+        except Exception as exc:                       # noqa: BLE001
+            self.app.toast(f"コピーできません: {exc}")
+
     def _dns_menu(self):
         sel = self.dns_t.selection()
         if not sel:
@@ -1572,6 +1604,18 @@ class NetworkPage(Page):
         self.summary.configure(
             text=f"内部DNS: {data.get('resolver') or '(未設定)'}   /   "
                  f"WAN: {wtxt}   /   自動ポート開放: {auto}")
+
+        # 接続先(プロキシが最上段。配下サーバーは個別に繋げないので出さない)
+        self._conn_by_iid = {}
+        crows = []
+        for i, r in enumerate(data.get("connect", [])):
+            iid = f"conn{i}"
+            self._conn_by_iid[iid] = r.get("connect", "")
+            tag = "ok" if r.get("kind") == "proxy" else ""
+            crows.append((iid, r.get("display", ""),
+                          (r.get("connect", ""), r.get("note", "")),
+                          [tag] if tag else []))
+        fill(self.conn_t, crows)
 
         # DNS
         self._dns_by_name = {r["name"]: r for r in data.get("dns", [])}
