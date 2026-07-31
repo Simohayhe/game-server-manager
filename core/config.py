@@ -38,8 +38,20 @@ class ProxyConfig:
     ip: str                        # プロキシが動いているホストのLAN IP
     port: int = 25565              # 外部/内部ともこのポート(既定=MCの標準ポート)
     proto: str = "TCP"
-    fqdn: str = ""                 # 接続用の名前。空なら発行しない
+    # 前段に置く対象のクラスタ名。接続名は既定で「クラスタ名.ドメイン」になる
+    # (1クラスタ=1プロキシ=1アドレス。増やすときに名前を考えなくてよい)。
+    cluster: str = ""
+    fqdn: str = ""                 # 明示指定したい時だけ。空ならclusterから導出
     game: str = "minecraft"        # 表示用
+
+    def resolve_fqdn(self, domain: str) -> str:
+        """接続用FQDN。fqdn明示があればそれ、無ければ <クラスタ名>.<ドメイン>。"""
+        if self.fqdn:
+            return self.fqdn
+        base = self.cluster or self.name
+        if not base or not domain:
+            return ""
+        return base if "." in base else f"{base}.{domain}"
 
 
 @dataclass
@@ -130,6 +142,7 @@ def _parse_proxies(raw) -> list:
             name=str(p["name"]), ip=str(p["ip"]),
             port=int(p.get("port", 25565)),
             proto=str(p.get("proto", "TCP")).upper(),
+            cluster=str(p.get("cluster", "") or ""),
             fqdn=str(p.get("fqdn", "") or ""),
             game=str(p.get("game", "minecraft")),
         ))

@@ -24,31 +24,35 @@ def ensure_records(cfg, wan_ip: str, progress=lambda t: None) -> list[dict]:
     if not proxies:
         return out
     if not dns:
-        return [{"name": p.name, "fqdn": p.fqdn, "ok": False,
-                 "reason": "DNS未設定"} for p in proxies if p.fqdn]
+        return [{"name": p.name, "ok": False, "reason": "DNS未設定"} for p in proxies]
     if not wan_ip:
-        return [{"name": p.name, "fqdn": p.fqdn, "ok": False,
-                 "reason": "WAN IP不明"} for p in proxies if p.fqdn]
+        return [{"name": p.name, "ok": False, "reason": "WAN IP不明"} for p in proxies]
 
     for p in proxies:
-        if not p.fqdn:
+        fqdn = p.resolve_fqdn(dns.domain)      # 既定は <クラスタ名>.<ドメイン>
+        if not fqdn:
             out.append({"name": p.name, "fqdn": "", "ok": False,
-                        "reason": "fqdn未指定(発行しない)"})
+                        "reason": "cluster/fqdn どちらも未指定"})
             continue
         try:
-            dnsreg.set_a_record(dns, p.fqdn, wan_ip, progress=progress)
-            out.append({"name": p.name, "fqdn": p.fqdn, "ip": wan_ip, "ok": True})
+            dnsreg.set_a_record(dns, fqdn, wan_ip, progress=progress)
+            out.append({"name": p.name, "fqdn": fqdn, "ip": wan_ip, "ok": True})
         except Exception as exc:              # noqa: BLE001 1件失敗で全体を止めない
-            out.append({"name": p.name, "fqdn": p.fqdn, "ok": False,
+            out.append({"name": p.name, "fqdn": fqdn, "ok": False,
                         "reason": str(exc)})
     return out
 
 
 def summary(cfg) -> list[dict]:
     """設定済みプロキシの一覧(接続先の案内用)。"""
-    return [{
-        "name": p.name, "ip": p.ip, "port": p.port, "proto": p.proto,
-        "fqdn": p.fqdn, "game": p.game,
-        # 25565はMinecraftの既定ポートなので、その時だけポート指定が要らない
-        "connect": (p.fqdn or p.ip) + ("" if p.port == 25565 else f":{p.port}"),
-    } for p in (getattr(cfg, "proxies", None) or [])]
+    domain = getattr(getattr(cfg, "dns", None), "domain", "") or ""
+    out = []
+    for p in (getattr(cfg, "proxies", None) or []):
+        fqdn = p.resolve_fqdn(domain)
+        out.append({
+            "name": p.name, "ip": p.ip, "port": p.port, "proto": p.proto,
+            "cluster": p.cluster, "fqdn": fqdn, "game": p.game,
+            # 25565はMinecraftの既定ポートなので、その時だけポート指定が要らない
+            "connect": (fqdn or p.ip) + ("" if p.port == 25565 else f":{p.port}"),
+        })
+    return out
