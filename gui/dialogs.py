@@ -487,16 +487,21 @@ class ProvisionDialog(ctk.CTkToplevel):
         self.version_combo = ScrollCombo(form, values=["26.2"], width=500)
         self.version_combo.set("26.2")
         self.version_combo.pack(anchor="w", padx=8, pady=(2, 0))
-        self._add_row(form, "name", "サーバー名(英数字・config内で一意)", "minecraft4")
-        self._add_row(form, "display_name", "表示名", "マイクラ4")
+        # サーバーごとに違う項目は空欄にする。既存サーバーの値を初期表示すると、
+        # そのまま実行して名前やIPが衝突する事故になる(例: minecraft4/mcserver04)。
+        self._add_row(form, "name", "サーバー名(英数字・config内で一意)", "",
+                      placeholder="例: minecraft6")
+        self._add_row(form, "display_name", "表示名", "",
+                      placeholder="サーバー名から自動入力")
         # 表示名/VM名はサーバー名に追従させる(3箇所に別々の名前を入れると
         # 後から対応が分からなくなるため)。手で書き換えたらそちらを尊重する。
         self._name_synced = True
         self._rows["name"].bind("<KeyRelease>", self._on_name_typed)
         self._rows["display_name"].bind("<KeyRelease>", self._on_manual_edit)
-        self._add_row(form, "host", "構築先ホスト(VMのIP)", "192.168.11.103")
+        self._add_row(form, "host", "構築先ホスト(VMのIP)", "",
+                      placeholder="例: 192.168.11.107(空きIP)")
         self._add_row(form, "vm", "VM名(任意・自動起動連携に使う。英数字とハイフンのみ)",
-                      "mcserver04")
+                      "", placeholder="サーバー名から自動入力")
         self._rows["vm"].bind("<KeyRelease>", self._on_manual_edit)
         self._add_row(form, "ssh_user", "SSHユーザー", "master")
         self._add_row(form, "ssh_password", "SSHパスワード", "", secret=True)
@@ -527,10 +532,11 @@ class ProvisionDialog(ctk.CTkToplevel):
         self.after(120, self.lift)
         self._load_templates()
 
-    def _add_row(self, parent, key, label, default, secret=False):
+    def _add_row(self, parent, key, label, default, secret=False, placeholder=""):
         ctk.CTkLabel(parent, text=label, text_color=MUTED,
                      font=ctk.CTkFont(size=11)).pack(anchor="w", padx=8, pady=(6, 0))
-        e = ctk.CTkEntry(parent, width=500, show="•" if secret else "")
+        e = ctk.CTkEntry(parent, width=500, show="•" if secret else "",
+                         placeholder_text=placeholder)
         if default:
             e.insert(0, default)
         e.pack(anchor="w", padx=8, pady=(2, 0))
