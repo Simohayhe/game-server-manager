@@ -94,6 +94,43 @@ def find_conflicts(cfg, host_ip: str = "") -> list[dict]:
     return out
 
 
+MC_PORT_BASE = 25565      # Minecraftの標準ポート。外部ポートはここから採番する
+MC_PORT_MAX = 25599       # 広げすぎない(この帯だけ見ればMCの割当が分かる)
+
+
+def next_external_port(cfg, game: str = "minecraft", exclude: str = "") -> int | None:
+    """外部公開に使える空きポートを返す。埋まっていれば None。
+
+    Minecraftは TCP 2556x 帯で完結する(ARKはUDP 7777/2701x、PalworldはUDP 8211
+    なので実際にはぶつからない)。よってMCの割当はこの帯の中だけを見ればよい。
+    SRVレコードで隠すので、番号が標準の25565でなくてもプレイヤーは
+    FQDNだけで繋げる。
+    """
+    proto = "UDP" if game == "palworld" else "TCP"
+    used = set()
+    for s in (getattr(cfg, "servers", None) or []):
+        if s.name == exclude:
+            continue
+        if getattr(s, "proxied", False):        # プロキシ配下は外に出ない
+            continue
+        ext = s.external_port or s.game_port
+        if ext:
+            used.add(int(ext))
+    for p in (getattr(cfg, "proxies", None) or []):
+        if p.proto.upper() == proto:
+            used.add(int(p.port))
+    for e in (getattr(cfg, "portsync_extra", None) or []):
+        try:
+            if str(e.get("proto", "TCP")).upper() == proto:
+                used.add(int(e["ext_port"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    for port in range(MC_PORT_BASE, MC_PORT_MAX + 1):
+        if port not in used:
+            return port
+    return None
+
+
 def describe(conflicts: list[dict]) -> str:
     """通知/表示用の文字列。"""
     if not conflicts:

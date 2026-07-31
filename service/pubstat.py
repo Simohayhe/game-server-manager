@@ -86,6 +86,23 @@ def compute(ctx) -> dict:
 def publish_server(ctx, profile) -> str:
     """MC/PalworldをFQDNで外部公開(UPnP転送 + DNS A/SRV)。WAN IPを返す。"""
     ext = profile.external_port or profile.game_port
+    # 外部ポート未設定のMCは自動採番する。全サーバーが標準25565のままだと
+    # WAN側は1台しか出せないため(SRVで隠すのでプレイヤーはFQDNだけで繋げる)。
+    if profile.game == "minecraft" and not profile.external_port:
+        from core import portcheck
+        taken = {s.external_port or s.game_port
+                 for s in ctx.config.servers
+                 if s.name != profile.name and not getattr(s, "proxied", False)}
+        if profile.game_port in taken:            # 既定ポートが他に取られている
+            new = portcheck.next_external_port(ctx.config, exclude=profile.name)
+            if new is None:
+                raise RuntimeError("外部ポートの空きがありません(25565-25599)")
+            from core import settings
+            settings.update_config(ctx.config_path,
+                                   {"servers": {profile.name:
+                                                {"external_port": int(new)}}})
+            profile.external_port = int(new)      # 実行中のプロファイルにも反映
+            ext = int(new)
     proto = "UDP" if profile.game == "palworld" else "TCP"
     net = ctx.config.network
     gw = upnp.find_gateway(bind_ip=upnp.local_ip_toward(net.gateway) if net else None,
