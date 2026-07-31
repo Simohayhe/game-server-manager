@@ -86,6 +86,15 @@ class ClusterManager:
         self.state_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def _proxy_of(self, cluster_name: str) -> dict:
+        """このクラスタを前段で受けるプロキシの接続情報。無ければ未設定を返す。"""
+        from . import proxyreg
+        for px in proxyreg.summary(self.config):
+            if px.get("cluster") == cluster_name:
+                return {"connect": px["connect"], "proxy": px["name"],
+                        "proxy_port": px["port"]}
+        return {"connect": "", "proxy": "", "proxy_port": 0}
+
     def summary(self) -> dict:
         data = self.load()
         profs = self._profiles()
@@ -102,7 +111,10 @@ class ClusterManager:
                     "share": bool(m.get("share")),
                     "address": p.address if p else "?",
                 })
-            clusters.append({"name": cname, "members": mem})
+            # そのクラスタの前段プロキシ=プレイヤーに教える接続先。
+            # 配下サーバーは直接繋げない(proxied)ので、アドレスはここにしか出せない。
+            clusters.append({"name": cname, "members": mem,
+                             **self._proxy_of(cname)})
         available = [{"server": n, "display": p.display_name}
                      for n, p in profs.items() if n not in assigned]
         return {"clusters": clusters, "available": available,

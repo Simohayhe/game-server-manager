@@ -1186,6 +1186,14 @@ class ClusterPage(Page):
         for c in clusters:
             self._card(c)
 
+    def _copy_addr(self, addr: str):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(addr)
+            self.app.toast(f"コピーしました: {addr}")
+        except Exception as exc:                       # noqa: BLE001
+            self.app.toast(f"コピーできません: {exc}")
+
     def _card(self, c):
         card = ctk.CTkFrame(self.wrap, fg_color=CARD, corner_radius=10)
         card.pack(fill="x", pady=6)
@@ -1193,6 +1201,17 @@ class ClusterPage(Page):
         head.pack(fill="x", padx=12, pady=(10, 4))
         ctk.CTkLabel(head, text=f"🌐 {c['name']}", text_color=TEXT,
                      font=ctk.CTkFont(size=15, weight="bold")).pack(side="left")
+        # 接続先はここにしか出せない(配下サーバーはproxiedで直接繋げないため)
+        addr = c.get("connect") or ""
+        if addr:
+            ctk.CTkLabel(head, text=f"  接続先: {addr}", text_color=OK,
+                         font=ctk.CTkFont(size=12, weight="bold")).pack(side="left")
+            self.btn(head, "📋 コピー", lambda a=addr: self._copy_addr(a),
+                     "normal").pack(side="left", padx=8)
+        else:
+            ctk.CTkLabel(head, text="  接続先: 未設定(config の proxies に "
+                         f"cluster: {c['name']} を追加)", text_color=MUTED,
+                         font=ctk.CTkFont(size=11)).pack(side="left")
         self.btn(head, "🗑 削除", lambda n=c["name"]: self._del(n), "danger").pack(side="right")
         self.btn(head, "＋ サーバー追加", lambda n=c["name"]: self._add(n),
                  "normal").pack(side="right", padx=6)

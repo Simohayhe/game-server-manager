@@ -489,8 +489,15 @@ class ProvisionDialog(ctk.CTkToplevel):
         self.version_combo.pack(anchor="w", padx=8, pady=(2, 0))
         self._add_row(form, "name", "サーバー名(英数字・config内で一意)", "minecraft4")
         self._add_row(form, "display_name", "表示名", "マイクラ4")
+        # 表示名/VM名はサーバー名に追従させる(3箇所に別々の名前を入れると
+        # 後から対応が分からなくなるため)。手で書き換えたらそちらを尊重する。
+        self._name_synced = True
+        self._rows["name"].bind("<KeyRelease>", self._on_name_typed)
+        self._rows["display_name"].bind("<KeyRelease>", self._on_manual_edit)
         self._add_row(form, "host", "構築先ホスト(VMのIP)", "192.168.11.103")
-        self._add_row(form, "vm", "VM名(任意・自動起動連携に使う)", "mcserver04")
+        self._add_row(form, "vm", "VM名(任意・自動起動連携に使う。英数字とハイフンのみ)",
+                      "mcserver04")
+        self._rows["vm"].bind("<KeyRelease>", self._on_manual_edit)
         self._add_row(form, "ssh_user", "SSHユーザー", "master")
         self._add_row(form, "ssh_password", "SSHパスワード", "", secret=True)
         self._add_row(form, "game_port", "ゲームポート", "25565")
@@ -528,6 +535,38 @@ class ProvisionDialog(ctk.CTkToplevel):
             e.insert(0, default)
         e.pack(anchor="w", padx=8, pady=(2, 0))
         self._rows[key] = e
+
+    @staticmethod
+    def vm_safe(text: str) -> str:
+        """VM名として使える形に落とす(英数字とハイフンのみ、先頭は英字)。
+
+        Hyper-VのVM名は日本語も通るが、ホスト名やDNS名にそのまま使うため
+        英数字に限定しておく(hostnameに非ASCIIが入ると名前解決が壊れる)。
+        """
+        out = "".join(ch if (ch.isascii() and (ch.isalnum() or ch == "-")) else "-"
+                      for ch in text)
+        out = out.strip("-")
+        while "--" in out:
+            out = out.replace("--", "-")
+        if out and not out[0].isalpha():        # 先頭が数字/記号だと使えない環境がある
+            out = "vm-" + out
+        return out.lower()[:15]                 # NetBIOS名の上限に合わせて15文字
+
+    def _on_name_typed(self, _e=None):
+        """サーバー名に合わせて表示名とVM名を埋める(手で直していなければ)。"""
+        if not self._name_synced:
+            return
+        name = self._rows["name"].get().strip()
+        for key, value in (("display_name", name), ("vm", self.vm_safe(name))):
+            e = self._rows.get(key)
+            if e is None:
+                continue
+            e.delete(0, "end")
+            e.insert(0, value)
+
+    def _on_manual_edit(self, _e=None):
+        """表示名/VM名を自分で書き換えたら、以後は追従をやめる。"""
+        self._name_synced = False
 
     def _toggle_create_vm(self):
         if self.create_vm_cb.get():
@@ -598,6 +637,20 @@ class ProvisionDialog(ctk.CTkToplevel):
             if not v.get(k):
                 messagebox.showinfo("入力不足", f"「{k}」を入力してください", parent=self)
                 return
+        # VM名はホスト名/DNS名にも使うので英数字とハイフンだけに限る
+        if v.get("vm"):
+            safe = self.vm_safe(v["vm"])
+            if safe != v["vm"]:
+                if not messagebox.askyesno(
+                        "VM名の確認",
+                        f"VM名「{v['vm']}」は使えない文字を含みます。\n"
+                        f"「{safe}」に直して続けますか?\n\n"
+                        "(VM名はホスト名やDNS名にも使うため英数字とハイフンのみです)",
+                        parent=self):
+                    return
+                v["vm"] = safe
+                self._rows["vm"].delete(0, "end")
+                self._rows["vm"].insert(0, safe)
         extra = (f"\n先に {v['vm_template']} から VM「{v['vm']}」を新規作成します"
                  f"(IP {v['host']})。" if create_vm else "")
         if not messagebox.askyesno(
