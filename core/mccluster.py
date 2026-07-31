@@ -164,6 +164,16 @@ class ClusterManager:
         data = self.load()
         data["clusters"].pop(name, None)
         self.save(data)
+        # このクラスタ専用だったプロキシ(接続名/DNS/ポート転送)も一緒に片付ける。
+        # 残すと入口だけが宙に浮き、何のための穴か分からなくなる。
+        try:
+            from . import proxyreg
+            gone = proxyreg.cleanup_for_cluster(self.config, self.config_path,
+                                                name, progress=progress)
+            if gone:
+                progress(f"プロキシ設定も削除: {', '.join(gone)}")
+        except Exception as exc:                  # noqa: BLE001 クラスタ削除は完了させる
+            progress(f"⚠ プロキシ設定の掃除に失敗: {exc}")
         self._rebuild_velocity(progress)
         return self.summary()
 

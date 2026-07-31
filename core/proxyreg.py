@@ -52,6 +52,46 @@ def ensure_records(cfg, wan_ip: str, progress=lambda t: None) -> list[dict]:
     return out
 
 
+def cleanup_for_cluster(cfg, config_path, cluster: str,
+                        progress=lambda t: None) -> list[str]:
+    """クラスタが消えた時、そのクラスタ用プロキシの設定/DNS/転送を片付ける。
+
+    プロキシは「そのクラスタへの入口」なので、クラスタが無くなれば存在意義が無い。
+    残しておくとポート転送とDNSだけが生き続け、後から見て何のための穴か
+    分からなくなる(実際にクラスタ削除後、宙に浮いた状態が発生した)。
+
+    戻り値は片付けたプロキシ名。DNSのPTRはWAN IPを他の名前と共有しているので
+    消さない(A/SRVだけ消す)。
+    """
+    from . import dnsreg, settings
+    removed = []
+    proxies = [p for p in (getattr(cfg, "proxies", None) or [])
+               if (p.cluster or "") == cluster]
+    if not proxies:
+        return removed
+    dns = getattr(cfg, "dns", None)
+    for p in proxies:
+        fqdn = p.resolve_fqdn(dns.domain) if dns else ""
+        if fqdn and dns:
+            try:                      # A/SRVのみ削除(ip未指定=PTRは触らない)
+                dnsreg.unregister_host(dns, fqdn, progress=progress)
+                progress(f"DNS削除: {fqdn}")
+            except Exception as exc:  # noqa: BLE001 設定の掃除は続ける
+                progress(f"⚠ DNS削除に失敗({fqdn}): {exc}")
+        removed.append(p.name)
+    # config から proxies 該当分を落とす
+    try:
+        keep = [{"name": p.name, "ip": p.ip, "port": p.port, "proto": p.proto,
+                 "cluster": p.cluster, "fqdn": p.fqdn, "game": p.game}
+                for p in (getattr(cfg, "proxies", None) or [])
+                if (p.cluster or "") != cluster]
+        settings.update_config(config_path, {"proxies": keep})
+        progress(f"proxies から {', '.join(removed)} を削除しました")
+    except Exception as exc:          # noqa: BLE001
+        progress(f"⚠ proxies の更新に失敗: {exc}")
+    return removed
+
+
 def summary(cfg) -> list[dict]:
     """設定済みプロキシの一覧(接続先の案内用)。"""
     domain = getattr(getattr(cfg, "dns", None), "domain", "") or ""

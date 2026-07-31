@@ -175,12 +175,38 @@ class PortSyncService:
                                          spec.internal_port, spec.proto,
                                          description=spec.desc)
                         actions.append(f"引継 {spec.label} {spec.proto}/{spec.ext_port}")
+                    elif mine and (m.get("description") != spec.desc
+                                   or str(m.get("internal_ip") or "") not in
+                                   ("", spec.internal_ip)):
+                        # 説明や転送先が実態とズレている(削除したサーバー名のまま等)。
+                        # 放置すると誰の穴か分からなくなるので付け直す。
+                        upnp.delete_mapping(gw, spec.ext_port, spec.proto)
+                        upnp.add_mapping(gw, spec.ext_port, spec.internal_ip,
+                                         spec.internal_port, spec.proto,
+                                         description=spec.desc)
+                        actions.append(f"修正 {spec.label} {spec.proto}/{spec.ext_port}")
                 else:                             # 停止中 → 閉じていること
                     if mine:
                         upnp.delete_mapping(gw, spec.ext_port, spec.proto)
                         actions.append(f"閉 {spec.label} {spec.proto}/{spec.ext_port}")
             except Exception as exc:              # 1件失敗しても他は続ける
                 print(f"ポート操作に失敗({spec.label}):", exc)
+
+        # GSMが開けた印(gsm-auto-*)なのに、もう設定のどこにも対応が無い転送を閉じる。
+        # サーバーやクラスタ(プロキシ)を消しても穴だけが残り続けるのを防ぐ。
+        # 他人が開けた転送や手動公開(gsm-<name>)には触れない。
+        wanted = {(str(s.ext_port), s.proto.upper()) for s in self._specs()}
+        for key, m in existing.items():
+            if key in wanted or not portsync.is_ours(m):
+                continue
+            try:
+                upnp.delete_mapping(gw, int(m["external_port"]),
+                                    (m.get("protocol") or "TCP").upper())
+                actions.append(f"閉(不要) {m.get('description')} "
+                               f"{m.get('protocol')}/{m.get('external_port')}")
+            except Exception as exc:              # noqa: BLE001
+                print("不要な転送の削除に失敗:", exc)
+
         if actions:
             print("ポート同期:", ", ".join(actions))
             if self.notifier:

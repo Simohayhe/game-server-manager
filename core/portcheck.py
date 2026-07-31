@@ -60,9 +60,13 @@ def collect(cfg, host_ip: str = "") -> dict:
             _add(local, (s.address, int(s.game_port), proto), f"{s.display_name}(ゲーム)")
         if s.rcon:
             _add(local, (s.address, int(s.rcon.port), "TCP"), f"{s.display_name}(RCON)")
-        # proxied はプロキシ経由なので外部公開しない=WAN側には出ない
-        if s.external_port and not getattr(s, "proxied", False):
-            _add(wan, (int(s.external_port), proto), f"{s.display_name}(外部)")
+        # proxied はプロキシ経由なので外部公開しない=WAN側には出ない。
+        # external_port 未設定でもポート同期は game_port をそのまま外部に使うので、
+        # 同じ既定ポートのサーバーが2台あると必ずWANで衝突する(見落としやすい)。
+        ext = s.external_port or s.game_port
+        if ext and not getattr(s, "proxied", False):
+            label = "外部" if s.external_port else "外部=既定ポート"
+            _add(wan, (int(ext), proto), f"{s.display_name}({label})")
 
     # 追加のポート転送(portsync.extra)
     for e in (getattr(cfg, "portsync_extra", None) or []):
