@@ -26,6 +26,23 @@ class HyperVConfig:
 
 
 @dataclass
+class ProxyConfig:
+    """ゲームサーバーの前段に置くプロキシ(Velocity等)。GSMの管理対象外プロセス。
+
+    プロキシ運用ではバックエンドを直接公開できない(online-mode=falseのため)ので、
+    **外に出るのはプロキシだけ**になる。プロキシを増やすたびに手でポート転送とDNSを
+    用意するのは事故のもと(ルーター再起動で消えても気づけない)なので、ここに1行
+    足せば「ポート転送の維持」と「FQDNの発行」を両方GSMが面倒を見る。
+    """
+    name: str                      # 識別名(ポート転送の説明に出る)
+    ip: str                        # プロキシが動いているホストのLAN IP
+    port: int = 25565              # 外部/内部ともこのポート(既定=MCの標準ポート)
+    proto: str = "TCP"
+    fqdn: str = ""                 # 接続用の名前。空なら発行しない
+    game: str = "minecraft"        # 表示用
+
+
+@dataclass
 class SyslogConfig:
     """syslog受信(ルーター等のログを受けてファイル保存＋Discord転送)。
 
@@ -92,6 +109,7 @@ class AppConfig:
     # GSMが管理しないサービス(Velocityプロキシ等)の常時ポート転送。
     # ルーター再起動でUPnP設定が消えても、ポート同期がここを見て復活させる。
     portsync_extra: list = field(default_factory=list)
+    proxies: list = field(default_factory=list)   # ProxyConfig(前段プロキシ)
     syslog: "SyslogConfig | None" = None    # syslog受信(未設定=無効)
     api_host: str = "127.0.0.1"            # API待受(既定=localhost限定。0.0.0.0でLAN公開)
     api_token: str = ""                    # API接続パスワード(LAN公開時に推奨。空=認証なし)
@@ -100,6 +118,22 @@ class AppConfig:
 
 class ConfigError(Exception):
     pass
+
+
+def _parse_proxies(raw) -> list:
+    """proxies: の解析。名前とIPが無い項目は無視する(壊れた1件で全体を止めない)。"""
+    out = []
+    for p in (raw or []):
+        if not p or not p.get("name") or not p.get("ip"):
+            continue
+        out.append(ProxyConfig(
+            name=str(p["name"]), ip=str(p["ip"]),
+            port=int(p.get("port", 25565)),
+            proto=str(p.get("proto", "TCP")).upper(),
+            fqdn=str(p.get("fqdn", "") or ""),
+            game=str(p.get("game", "minecraft")),
+        ))
+    return out
 
 
 def _parse_syslog(raw) -> "SyslogConfig | None":
@@ -314,6 +348,7 @@ def load_config(path: str | Path) -> AppConfig:
                      pal_hosts=pal_hosts, backup=backup, deployment=deployment,
                      syslog=_parse_syslog(raw.get("syslog")),
                      portsync_extra=list((raw.get("portsync") or {}).get("extra") or []),
+                     proxies=_parse_proxies(raw.get("proxies")),
                      heartbeat_url=str((raw.get("monitoring") or {}).get(
                          "heartbeat_url", "") or ""),
                      heartbeat_interval_min=int((raw.get("monitoring") or {}).get(

@@ -83,6 +83,12 @@ class PortSyncService:
                 label=f"{p.game}-{name}", ext_port=(p.external_port or p.game_port),
                 internal_ip=p.address, internal_port=p.game_port, proto=proto,
                 desired=running))
+        # 前段プロキシ(Velocity等)。外に出るのはプロキシだけなので常時開けておく。
+        for px in (getattr(self.ctx.config, "proxies", None) or []):
+            specs.append(portsync.PortSpec(
+                label=f"proxy-{px.name}", ext_port=px.port, internal_ip=px.ip,
+                internal_port=px.port, proto=px.proto, desired=True))
+
         # 追加で常時開けておきたい転送(プロキシ等、GSMが管理しないサービス用)。
         # config の portsync.extra に書く。ルーター再起動で消えても自動で復活する。
         for e in (getattr(self.ctx.config, "portsync_extra", None) or []):

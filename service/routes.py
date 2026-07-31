@@ -93,6 +93,31 @@ def build_router(ctx, state, scheduler=None, dynserve=None, portsync=None,
         }
     r.add("GET", "/api/health", health)
 
+    def proxies_get(**_):
+        """前段プロキシの一覧と接続先。バックエンドは公開しないので入口はここだけ。"""
+        from core import proxyreg
+        return {"proxies": proxyreg.summary(ctx.config)}
+    r.add("GET", "/api/proxies", proxies_get)
+
+    def proxies_dns(**_):
+        """各プロキシのFQDNを現WAN IPに向ける(発行/修復)。"""
+        from core import proxyreg
+        wan = ""
+        try:
+            from service import pubstat
+            gw = pubstat._gateway(ctx)
+            wan = (gw.external_ip or "") if gw else ""
+        except Exception:
+            pass
+        if not wan:
+            wan = getattr(getattr(ctx.config, "publish", None), "last_wan_ip", "") or ""
+        t = jobs.submit("🌐 プロキシFQDNを発行/更新",
+                        lambda: proxyreg.ensure_records(ctx.config, wan,
+                                                        progress=jobs.progress),
+                        lane="dns", category="DNS")
+        return {"task_id": t.id, "wan_ip": wan}
+    r.add("POST", "/api/proxies/dns", proxies_dns)
+
     def syslog_status(query, **_):
         """受信したsyslogの状況と直近ログ。ルーターの再起動原因を追う用。"""
         if syslog is None:
