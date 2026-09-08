@@ -65,7 +65,9 @@ def java_for(version: str) -> int:
         if mn <= 20:
             return 21 if (mn == 20 and pt >= 5) else 17
         return 21
-    return 21  # 26.x 以降
+    # 26.x以降のサーバーjarは Java 25 でコンパイルされている(class file version 69)。
+    # Java 21(class 65)では UnsupportedClassVersionError で起動できない。
+    return 25
 
 
 def upgradable_versions(current: str, stable_only: bool = True) -> list[str]:
