@@ -13,6 +13,8 @@ import sys
 import threading
 
 from service.api import API_PORT_DEFAULT, ApiServer
+from service.appupdate import AppUpdateService
+from service.appupdate import add_routes as add_appupdate_routes
 from service.app import Service
 from service.context import Context
 from service.dynserve import DynServe
@@ -41,9 +43,14 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
                   on_ready=rec.on_ready, history=hist)
     from core.syslogsrv import SyslogServer
     syslog = SyslogServer(ctx, notifier=notifier)
-    api = ApiServer(build_router(ctx, state, scheduler=sched, dynserve=dyn,
-                                 portsync=ports, recovery=rec, history=hist,
-                                 notifier=notifier, syslog=syslog),
+    # GSM本体(GitHubリリース)の更新チェック。バージョンはGUIの定義を唯一の出所にする。
+    from gui.app_ctk import APP_VERSION, GITHUB_REPO
+    appupd = AppUpdateService(ctx, GITHUB_REPO, APP_VERSION, notifier=notifier)
+    router = build_router(ctx, state, scheduler=sched, dynserve=dyn,
+                          portsync=ports, recovery=rec, history=hist,
+                          notifier=notifier, syslog=syslog)
+    add_appupdate_routes(router, appupd)     # routes.py を触らずAPIを追加する
+    api = ApiServer(router,
                     port=api_port,
                     host=getattr(ctx.config, "api_host", "127.0.0.1"),
                     token=getattr(ctx.config, "api_token", ""),
@@ -54,7 +61,7 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
     beat = HeartbeatService(ctx)
 
     # 起動順: 配信 → 監視 → 予約 → ポート同期 → 採取 → API(最後=全部揃ってから受付)
-    components = [dyn, mon, sched, ports, sampler, beat, syslog, api]
+    components = [dyn, mon, sched, ports, sampler, beat, syslog, appupd, api]
 
     # 追加待受(既定80): ブラウザで http://<ホスト>/ とポート無しで開けるようにする。
     # 同じルータ/認証を共有するので、8770と機能・パスワードは同一。
@@ -71,7 +78,7 @@ def build_service(api_port: int = API_PORT_DEFAULT) -> Service:
         svc.add(c)
     svc.ctx_extra = {"state": state, "dyn": dyn, "sched": sched, "api": api,
                      "ports": ports, "rec": rec, "history": hist, "api_web": api_web,
-                     "syslog": syslog}
+                     "syslog": syslog, "appupdate": appupd}
 
     # PC再起動後の復帰: 再起動前に動いていたARKマップを起動し直す(VMはHyper-V任せ)。
     # 起動をブロックしないよう別スレッドで。記録が無ければ何もしない。

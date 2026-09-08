@@ -24,12 +24,16 @@ def _ver_tuple(tag: str) -> tuple:
 def check_latest(repo: str, current: str, timeout: float = 8.0) -> dict:
     """全リリース中のバージョン最大版と current を比較する。
 
-    戻り値: {current, latest, update_available, url, error}
+    戻り値: {current, latest, update_available, url, error,
+             title, notes, published_at, assets}
+      notes: リリース本文(更新内容)。GUI/Webで「何が変わったか」を見せるのに使う。
+      assets: [{name, size, url}] 添付ファイル(exe/インストーラ)。
       error: None=正常 / "no-release"=リリース未作成 / それ以外=失敗理由
     """
     out = {
         "current": current, "latest": None, "update_available": False,
         "url": f"https://github.com/{repo}/releases", "error": None,
+        "title": None, "notes": "", "published_at": None, "assets": [],
     }
     try:
         req = urllib.request.Request(
@@ -49,6 +53,14 @@ def check_latest(repo: str, current: str, timeout: float = 8.0) -> dict:
         tag = newest.get("tag_name") or newest.get("name")
         out["latest"] = tag
         out["url"] = newest.get("html_url") or out["url"]
+        out["title"] = newest.get("name") or tag
+        out["notes"] = (newest.get("body") or "").strip()
+        out["published_at"] = newest.get("published_at")
+        out["assets"] = [
+            {"name": a.get("name"), "size": a.get("size"),
+             "url": a.get("browser_download_url")}
+            for a in (newest.get("assets") or [])
+        ]
         if tag and _ver_tuple(tag) > _ver_tuple(current):
             out["update_available"] = True
     except urllib.error.HTTPError as e:

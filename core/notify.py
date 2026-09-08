@@ -30,6 +30,7 @@ DEFAULT_EVENTS = {
     "ip_conflict": True,   # IPアドレス競合(同一IPのVMが両方起動中)
     "syslog": True,        # 機器(ルーター等)のsyslog。重要度で絞って転送する
     "port": False,         # ポート開閉(既定OFF=うるさいので)
+    "app_update": True,    # GSM本体の新バージョン(GitHubリリース)
 }
 EVENT_LABELS = {
     "server_up": "サーバー起動", "server_down": "サーバー停止",
@@ -40,6 +41,7 @@ EVENT_LABELS = {
     "ip_conflict": "IPアドレス競合",
     "syslog": "機器ログ(syslog)",
     "port": "ポート開閉",
+    "app_update": "GSM本体の更新",
 }
 
 # 通知をゲーム種別で絞れるようにする(Discordのチャンネルをゲームごとに分けている人向け)。
