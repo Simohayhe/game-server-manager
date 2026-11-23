@@ -1,6 +1,6 @@
 # game-server-manager
 
-game-server-manager の配布用。ソースは非公開です(保管は自前のForgejo)。
+game-server-manager の配布用。ソースコードは公開していません。
 
 ## ダウンロード
 
